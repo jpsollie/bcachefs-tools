@@ -374,6 +374,11 @@ static inline int is_fragmented_bucket(struct bucket_mark m,
 	return 0;
 }
 
+static inline int bucket_stripe_sectors(struct bucket_mark m)
+{
+	return m.stripe ? m.dirty_sectors : 0;
+}
+
 static inline enum bch_data_type bucket_type(struct bucket_mark m)
 {
 	return m.cached_sectors && !m.dirty_sectors
@@ -441,33 +446,35 @@ static void bch2_dev_usage_update(struct bch_fs *c, struct bch_dev *ca,
 				  struct bucket_mark old, struct bucket_mark new,
 				  bool gc)
 {
-	struct bch_dev_usage *dev_usage;
+	struct bch_dev_usage *u;
 
 	percpu_rwsem_assert_held(&c->mark_lock);
 
 	preempt_disable();
-	dev_usage = this_cpu_ptr(ca->usage[gc]);
+	u = this_cpu_ptr(ca->usage[gc]);
 
 	if (bucket_type(old))
-		account_bucket(fs_usage, dev_usage, bucket_type(old),
+		account_bucket(fs_usage, u, bucket_type(old),
 			       -1, -ca->mi.bucket_size);
 
 	if (bucket_type(new))
-		account_bucket(fs_usage, dev_usage, bucket_type(new),
+		account_bucket(fs_usage, u, bucket_type(new),
 			       1, ca->mi.bucket_size);
 
-	dev_usage->buckets_alloc +=
+	u->buckets_alloc +=
 		(int) new.owned_by_allocator - (int) old.owned_by_allocator;
-	dev_usage->buckets_ec +=
-		(int) new.stripe - (int) old.stripe;
-	dev_usage->buckets_unavailable +=
+	u->buckets_unavailable +=
 		is_unavailable_bucket(new) - is_unavailable_bucket(old);
 
-	dev_usage->sectors[old.data_type] -= old.dirty_sectors;
-	dev_usage->sectors[new.data_type] += new.dirty_sectors;
-	dev_usage->sectors[BCH_DATA_CACHED] +=
+	u->buckets_ec += (int) new.stripe - (int) old.stripe;
+	u->sectors_ec += bucket_stripe_sectors(new) -
+			 bucket_stripe_sectors(old);
+
+	u->sectors[old.data_type] -= old.dirty_sectors;
+	u->sectors[new.data_type] += new.dirty_sectors;
+	u->sectors[BCH_DATA_CACHED] +=
 		(int) new.cached_sectors - (int) old.cached_sectors;
-	dev_usage->sectors_fragmented +=
+	u->sectors_fragmented +=
 		is_fragmented_bucket(new, ca) - is_fragmented_bucket(old, ca);
 	preempt_enable();
 
@@ -1360,8 +1367,8 @@ int bch2_mark_update(struct btree_trans *trans,
 		     unsigned flags)
 {
 	struct bch_fs		*c = trans->c;
-	struct btree		*b = iter->l[0].b;
-	struct btree_node_iter	node_iter = iter->l[0].iter;
+	struct btree		*b = iter_l(iter)->b;
+	struct btree_node_iter	node_iter = iter_l(iter)->iter;
 	struct bkey_packed	*_k;
 	int ret = 0;
 
@@ -1423,32 +1430,38 @@ void bch2_trans_fs_usage_apply(struct btree_trans *trans,
 		disk_res_sectors);
 
 	trans_for_each_update(trans, i) {
-		struct btree_iter	*iter = i->iter;
-		struct btree		*b = iter->l[0].b;
-		struct btree_node_iter	node_iter = iter->l[0].iter;
-		struct bkey_packed	*_k;
-
 		pr_err("while inserting");
 		bch2_bkey_val_to_text(&PBUF(buf), c, bkey_i_to_s_c(i->k));
 		pr_err("%s", buf);
 		pr_err("overlapping with");
 
-		node_iter = iter->l[0].iter;
-		while ((_k = bch2_btree_node_iter_peek(&node_iter, b))) {
-			struct bkey		unpacked;
-			struct bkey_s_c		k;
+		if (btree_iter_type(i->iter) != BTREE_ITER_CACHED) {
+			struct btree		*b = iter_l(i->iter)->b;
+			struct btree_node_iter	node_iter = iter_l(i->iter)->iter;
+			struct bkey_packed	*_k;
 
-			k = bkey_disassemble(b, _k, &unpacked);
+			while ((_k = bch2_btree_node_iter_peek(&node_iter, b))) {
+				struct bkey		unpacked;
+				struct bkey_s_c		k;
 
-			if (btree_node_is_extents(b)
-			    ? bkey_cmp(i->k->k.p, bkey_start_pos(k.k)) <= 0
-			    : bkey_cmp(i->k->k.p, k.k->p))
-				break;
+				pr_info("_k %px format %u", _k, _k->format);
+				k = bkey_disassemble(b, _k, &unpacked);
 
-			bch2_bkey_val_to_text(&PBUF(buf), c, k);
+				if (btree_node_is_extents(b)
+				    ? bkey_cmp(i->k->k.p, bkey_start_pos(k.k)) <= 0
+				    : bkey_cmp(i->k->k.p, k.k->p))
+					break;
+
+				bch2_bkey_val_to_text(&PBUF(buf), c, k);
+				pr_err("%s", buf);
+
+				bch2_btree_node_iter_advance(&node_iter, b);
+			}
+		} else {
+			struct bkey_cached *ck = (void *) i->iter->l[0].b;
+
+			bch2_bkey_val_to_text(&PBUF(buf), c, bkey_i_to_s_c(ck->k));
 			pr_err("%s", buf);
-
-			bch2_btree_node_iter_advance(&node_iter, b);
 		}
 	}
 }
@@ -1800,8 +1813,8 @@ int bch2_trans_mark_update(struct btree_trans *trans,
 			   struct bkey_i *insert,
 			   unsigned flags)
 {
-	struct btree		*b = iter->l[0].b;
-	struct btree_node_iter	node_iter = iter->l[0].iter;
+	struct btree		*b = iter_l(iter)->b;
+	struct btree_node_iter	node_iter = iter_l(iter)->iter;
 	struct bkey_packed	*_k;
 	int ret;
 
@@ -1993,8 +2006,6 @@ int bch2_dev_buckets_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 	int ret = -ENOMEM;
 	unsigned i;
 
-	lockdep_assert_held(&c->state_lock);
-
 	memset(&free,		0, sizeof(free));
 	memset(&free_inc,	0, sizeof(free_inc));
 	memset(&alloc_heap,	0, sizeof(alloc_heap));
@@ -2021,6 +2032,7 @@ int bch2_dev_buckets_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 	bch2_copygc_stop(ca);
 
 	if (resize) {
+		down_write(&c->gc_lock);
 		down_write(&ca->bucket_lock);
 		percpu_down_write(&c->mark_lock);
 	}
@@ -2043,8 +2055,10 @@ int bch2_dev_buckets_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 
 	swap(ca->buckets_nouse, buckets_nouse);
 
-	if (resize)
+	if (resize) {
 		percpu_up_write(&c->mark_lock);
+		up_write(&c->gc_lock);
+	}
 
 	spin_lock(&c->freelist_lock);
 	for (i = 0; i < RESERVE_NR; i++) {

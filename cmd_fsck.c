@@ -18,7 +18,7 @@ static void usage(void)
 	     "  -f                     Force checking even if filesystem is marked clean\n"
 	     " --reconstruct_alloc     Reconstruct the alloc btree\n"
 	     "  -v                     Be verbose\n"
-	     " --h                     Display this help and exit\n"
+	     "  -h                     Display this help and exit\n"
 	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
 }
 

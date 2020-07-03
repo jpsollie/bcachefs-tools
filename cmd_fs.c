@@ -14,12 +14,25 @@
 #include "cmds.h"
 #include "libbcachefs.h"
 
+static void print_dev_usage_type(const char *type,
+				 unsigned bucket_size,
+				 u64 buckets, u64 sectors,
+				 enum units units)
+{
+	u64 frag = max((s64) buckets * bucket_size - (s64) sectors, 0LL);
+
+	printf_pad(20, "  %s:", type);
+	printf("%12s%12llu%12s\n",
+	       pr_units(sectors, units),
+	       buckets,
+	       pr_units(frag, units));
+}
+
 static void print_dev_usage(struct bchfs_handle fs,
 			    struct dev_name *d,
 			    enum units units)
 {
 	struct bch_ioctl_dev_usage u = bchu_dev_usage(fs, d->idx);
-	u64 available = u.nr_buckets;
 	unsigned i;
 
 	printf("\n");
@@ -30,23 +43,23 @@ static void print_dev_usage(struct bchfs_handle fs,
 	       "", "data", "buckets", "fragmented");
 
 	for (i = BCH_DATA_SB; i < BCH_DATA_NR; i++) {
-		u64 frag = max((s64) u.buckets[i] * u.bucket_size -
-			       (s64) u.sectors[i], 0LL);
-
-		printf_pad(20, "  %s:", bch2_data_types[i]);
-		printf("%12s%12llu%12s\n",
-		       pr_units(u.sectors[i], units),
-		       u.buckets[i],
-		       pr_units(frag, units));
-
-		if (i != BCH_DATA_CACHED)
-			available -= u.buckets[i];
+		print_dev_usage_type(bch2_data_types[i],
+				     u.bucket_size,
+				     u.buckets[i],
+				     u.sectors[i],
+				     units);
 	}
+
+	print_dev_usage_type("erasure coded",
+			     u.bucket_size,
+			     u.ec_buckets,
+			     u.ec_sectors,
+			     units);
 
 	printf_pad(20, "  available:");
 	printf("%12s%12llu\n",
-	       pr_units(available * u.bucket_size, units),
-	       available);
+	       pr_units(u.available_buckets * u.bucket_size, units),
+	       u.available_buckets);
 
 	printf_pad(20, "  capacity:");
 	printf("%12s%12llu\n",
@@ -64,6 +77,54 @@ static int dev_by_label_cmp(const void *_l, const void *_r)
 		 ? strcmp(l->dev, r->dev) : 0) ?:
 		cmp_int(l->idx, r->idx);
 }
+
+static struct dev_name *dev_idx_to_name(dev_names *dev_names, unsigned idx)
+{
+	struct dev_name *dev;
+
+	darray_foreach(dev, *dev_names)
+		if (dev->idx == idx)
+			return dev;
+
+	return NULL;
+}
+
+static void print_replicas_usage(const struct bch_replicas_usage *r,
+				 dev_names *dev_names, enum units units)
+{
+	unsigned i;
+
+	if (!r->sectors)
+		return;
+
+	char devs[4096], *d = devs;
+	*d++ = '[';
+
+	for (i = 0; i < r->r.nr_devs; i++) {
+		unsigned dev_idx = r->r.devs[i];
+		struct dev_name *dev = dev_idx_to_name(dev_names, dev_idx);
+
+		if (i)
+			*d++ = ' ';
+
+		d += dev && dev->dev
+			? sprintf(d, "%s", dev->dev)
+			: sprintf(d, "%u", dev_idx);
+	}
+	*d++ = ']';
+	*d++ = '\0';
+
+	printf_pad(16, "%s: ", bch2_data_types[r->r.data_type]);
+	printf_pad(16, "%u/%u ", r->r.nr_required, r->r.nr_devs);
+	printf_pad(32, "%s ", devs);
+	printf(" %s\n", pr_units(r->sectors, units));
+}
+
+#define for_each_usage_replica(_u, _r)					\
+	for (_r = (_u)->replicas;					\
+	     _r != (void *) (_u)->replicas + (_u)->replica_entries_bytes;\
+	     _r = replicas_usage_next(_r),				\
+	     BUG_ON((void *) _r > (void *) (_u)->replicas + (_u)->replica_entries_bytes))
 
 static void print_fs_usage(const char *path, enum units units)
 {
@@ -100,39 +161,23 @@ static void print_fs_usage(const char *path, enum units units)
 
 	struct bch_replicas_usage *r;
 
-	for (r = u->replicas;
-	     r != (void *) u->replicas + u->replica_entries_bytes;
-	     r = replicas_usage_next(r)) {
-		BUG_ON((void *) r > (void *) u->replicas + u->replica_entries_bytes);
+	for_each_usage_replica(u, r)
+		if (r->r.data_type < BCH_DATA_USER)
+			print_replicas_usage(r, &dev_names, units);
 
-		if (!r->sectors)
-			continue;
+	for_each_usage_replica(u, r)
+		if (r->r.data_type == BCH_DATA_USER &&
+		    r->r.nr_required <= 1)
+			print_replicas_usage(r, &dev_names, units);
 
-		char devs[4096], *d = devs;
-		*d++ = '[';
+	for_each_usage_replica(u, r)
+		if (r->r.data_type == BCH_DATA_USER &&
+		    r->r.nr_required > 1)
+			print_replicas_usage(r, &dev_names, units);
 
-		for (i = 0; i < r->r.nr_devs; i++) {
-			unsigned dev_idx = r->r.devs[i];
-			if (i)
-				*d++ = ' ';
-
-			darray_foreach(dev, dev_names)
-				if (dev->idx == dev_idx)
-					goto found;
-			d = NULL;
-found:
-			d += dev && dev->dev
-				? sprintf(d, "%s", dev->dev)
-				: sprintf(d, "%u", dev_idx);
-		}
-		*d++ = ']';
-		*d++ = '\0';
-
-		printf_pad(16, "%s: ", bch2_data_types[r->r.data_type]);
-		printf_pad(16, "%u/%u ", r->r.nr_required, r->r.nr_devs);
-		printf_pad(32, "%s ", devs);
-		printf(" %s\n", pr_units(r->sectors, units));
-	}
+	for_each_usage_replica(u, r)
+		if (r->r.data_type > BCH_DATA_USER)
+			print_replicas_usage(r, &dev_names, units);
 
 	free(u);
 
