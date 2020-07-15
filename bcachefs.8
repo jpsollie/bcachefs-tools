@@ -99,7 +99,7 @@ Format one or a list of devices with bcachefs data structures.
 You need to do this before you create a volume.
 .Pp
 Device specific options must come before corresponding devices, e.g.
-.Dl bcachefs format --tier 0 /dev/sdb --tier 1 /dev/sdc
+.Dl bcachefs format --group=ssd /dev/sda --group=hdd /dev/sdb
 .Bl -tag -width Ds
 .It Fl b , Fl -block Ns = Ns Ar size
 block size, in bytes (e.g. 4k)
@@ -150,12 +150,6 @@ Specifies the bucket size;
 must be greater than the btree node size
 .It Fl -discard
 Enable discards on subsequent devices
-.It Fl t , Fl -tier Ar index
-Specifies the tier of subsequent devices, where
-.Ar index
-is a small integer and a smaller index indicates a faster tier; tier 0
-being the fastest.
-Currently only two tiers are supported.
 .It Fl q , Fl -quiet
 Only print errors
 .El
@@ -216,8 +210,6 @@ Size of filesystem on device
 Set bucket size
 .It Fl -discard
 Enable discards
-.It Fl t , Fl -tier Ns = Ns Ar number
-Higher tier (e.g. 1) indicates slower devices
 .It Fl f , Fl -force
 Use device even if it appears to already be formatted
 .El

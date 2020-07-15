@@ -732,6 +732,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	       "Label:				%s\n"
 	       "Version:			%llu\n"
 	       "Created:			%s\n"
+	       "Squence number:			%llu\n"
 	       "Block_size:			%s\n"
 	       "Btree node size:		%s\n"
 	       "Error action:			%s\n"
@@ -762,6 +763,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	       label,
 	       le64_to_cpu(sb->version),
 	       time_str,
+	       le64_to_cpu(sb->seq),
 	       pr_units(le16_to_cpu(sb->block_size), units),
 	       pr_units(BCH_SB_BTREE_NODE_SIZE(sb), units),
 
