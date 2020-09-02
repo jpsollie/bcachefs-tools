@@ -653,9 +653,13 @@ found:
 	return ret;
 }
 
-bool dev_mounted_rw(char *dev)
+int dev_mounted(char *dev)
 {
 	struct mntent *mnt = dev_to_mount(dev);
 
-	return mnt && !hasmntopt(mnt, "ro");
+	if (!mnt)
+		return 0;
+	if (hasmntopt(mnt, "ro"))
+		return 1;
+	return 2;
 }

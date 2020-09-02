@@ -1,4 +1,3 @@
-
 PREFIX?=/usr/local
 PKG_CONFIG?=pkg-config
 INSTALL=install
@@ -32,6 +31,8 @@ endif
 ifneq (,$(findstring clang,$(CC_VERSION)))
 	CFLAGS+=-Wno-missing-braces
 endif
+
+
 
 PKGCONFIG_LIBS="blkid uuid liburcu libsodium zlib liblz4 libzstd libudev"
 ifdef BCACHEFS_FUSE
@@ -112,6 +113,9 @@ endif
 # Rebuild the 'version' command any time the version string changes
 cmd_version.o : .version
 
+doc/bcachefs.5: doc/bcachefs.5.txt
+	a2x -f manpage doc/bcachefs.5.txt
+
 .PHONY: install
 install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
 install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
@@ -122,6 +126,7 @@ install: bcachefs
 	$(INSTALL) -m0644 -D bcachefs.8    -t $(DESTDIR)$(PREFIX)/share/man/man8/
 	$(INSTALL) -m0755 -D initramfs/script $(DESTDIR)$(INITRAMFS_SCRIPT)
 	$(INSTALL) -m0755 -D initramfs/hook   $(DESTDIR)$(INITRAMFS_HOOK)
+	$(INSTALL) -m0755 -D mount.bcachefs.sh $(DESTDIR)$(ROOT_SBINDIR)
 	sed -i '/^# Note: make install replaces/,$$d' $(DESTDIR)$(INITRAMFS_HOOK)
 	echo "copy_exec $(ROOT_SBINDIR)/bcachefs /sbin/bcachefs" >> $(DESTDIR)$(INITRAMFS_HOOK)
 

@@ -155,7 +155,7 @@ u32 crc32c(u32, const void *, size_t);
 char *dev_to_name(dev_t);
 char *dev_to_path(dev_t);
 struct mntent *dev_to_mount(char *);
-bool dev_mounted_rw(char *);
+int dev_mounted(char *);
 
 #define args_shift(_nr)							\
 do {									\

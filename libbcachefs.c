@@ -22,6 +22,7 @@
 #include "libbcachefs/btree_cache.h"
 #include "libbcachefs/checksum.h"
 #include "libbcachefs/disk_groups.h"
+#include "libbcachefs/journal_seq_blacklist.h"
 #include "libbcachefs/opts.h"
 #include "libbcachefs/replicas.h"
 #include "libbcachefs/super-io.h"
@@ -638,6 +639,17 @@ static void bch2_sb_print_clean(struct bch_sb *sb, struct bch_sb_field *f,
 static void bch2_sb_print_journal_seq_blacklist(struct bch_sb *sb, struct bch_sb_field *f,
 				enum units units)
 {
+	struct bch_sb_field_journal_seq_blacklist *bl = field_to_type(f, journal_seq_blacklist);
+	unsigned i, nr = blacklist_nr_entries(bl);
+
+	for (i = 0; i < nr; i++) {
+		struct journal_seq_blacklist_entry *e =
+			bl->start + i;
+
+		printf("  %llu-%llu\n",
+		       le64_to_cpu(e->start),
+		       le64_to_cpu(e->end));
+	}
 }
 
 typedef void (*sb_field_print_fn)(struct bch_sb *, struct bch_sb_field *, enum units);
@@ -963,8 +975,8 @@ int bchu_data(struct bchfs_handle fs, struct bch_ioctl_data cmd)
 		       bch2_data_types[e.p.data_type]);
 
 		switch (e.p.data_type) {
-		case BCH_DATA_BTREE:
-		case BCH_DATA_USER:
+		case BCH_DATA_btree:
+		case BCH_DATA_user:
 			printf(" %s:%llu:%llu",
 			       bch2_btree_ids[e.p.btree_id],
 			       e.p.pos.inode,
@@ -1055,7 +1067,9 @@ struct bch_opts bch2_parse_opts(struct bch_opt_strs strs)
 		ret = bch2_opt_parse(NULL, &bch2_opt_table[i],
 				     strs.by_id[i], &v);
 		if (ret < 0)
-			die("Invalid %s: %s", strs.by_id[i], strerror(-ret));
+			die("Invalid %s: %s",
+			    bch2_opt_table[i].attr.name,
+			    strerror(-ret));
 
 		bch2_opt_set_by_id(&opts, i, v);
 	}

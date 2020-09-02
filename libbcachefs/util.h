@@ -99,7 +99,7 @@ static inline void *vpmalloc(size_t size, gfp_t gfp_mask)
 {
 	return (void *) __get_free_pages(gfp_mask|__GFP_NOWARN,
 					 get_order(size)) ?:
-		__vmalloc(size, gfp_mask, PAGE_KERNEL);
+		__vmalloc(size, gfp_mask);
 }
 
 static inline void kvpfree(void *p, size_t size)
@@ -398,7 +398,7 @@ static inline void bch2_time_stats_update(struct time_stats *stats, u64 start)
 	__bch2_time_stats_update(stats, start, local_clock());
 }
 
-size_t bch2_time_stats_print(struct time_stats *, char *, size_t);
+void bch2_time_stats_to_text(struct printbuf *, struct time_stats *);
 
 void bch2_time_stats_exit(struct time_stats *);
 void bch2_time_stats_init(struct time_stats *);

@@ -83,7 +83,7 @@ enum opt_type {
 	  "size",	NULL)						\
 	x(btree_node_size,		u16,				\
 	  OPT_FORMAT,							\
-	  OPT_SECTORS(1, 128),						\
+	  OPT_SECTORS(1, 512),						\
 	  BCH_SB_BTREE_NODE_SIZE,	512,				\
 	  "size",	"Btree node size, default 256k")		\
 	x(errors,			u8,				\
@@ -260,6 +260,11 @@ enum opt_type {
 	  OPT_BOOL(),							\
 	  NO_SB_OPT,			false,				\
 	  NULL,		"Don't replay the journal")			\
+	x(rebuild_replicas,		u8,				\
+	  OPT_MOUNT,							\
+	  OPT_BOOL(),							\
+	  NO_SB_OPT,			false,				\
+	  NULL,		"Rebuild the superblock replicas section")	\
 	x(keep_journal,			u8,				\
 	  OPT_MOUNT,							\
 	  OPT_BOOL(),							\

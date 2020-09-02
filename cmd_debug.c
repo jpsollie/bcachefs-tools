@@ -11,8 +11,10 @@
 #include "libbcachefs/bcachefs.h"
 #include "libbcachefs/bset.h"
 #include "libbcachefs/btree_cache.h"
+#include "libbcachefs/btree_io.h"
 #include "libbcachefs/btree_iter.h"
 #include "libbcachefs/buckets.h"
+#include "libbcachefs/checksum.h"
 #include "libbcachefs/error.h"
 #include "libbcachefs/journal.h"
 #include "libbcachefs/journal_io.h"
@@ -237,6 +239,125 @@ static void list_nodes(struct bch_fs *c, enum btree_id btree_id,
 	bch2_trans_exit(&trans);
 }
 
+static void print_node_ondisk(struct bch_fs *c, struct btree *b)
+{
+	struct btree_node *n_ondisk;
+	struct extent_ptr_decoded pick;
+	struct bch_dev *ca;
+	struct bio *bio;
+	unsigned offset = 0;
+
+	if (bch2_bkey_pick_read_device(c, bkey_i_to_s_c(&b->key), NULL, &pick) <= 0) {
+		printf("error getting device to read from\n");
+		return;
+	}
+
+	ca = bch_dev_bkey_exists(c, pick.ptr.dev);
+	if (!bch2_dev_get_ioref(ca, READ)) {
+		printf("error getting device to read from\n");
+		return;
+	}
+
+	n_ondisk = malloc(btree_bytes(c));
+
+	bio = bio_alloc_bioset(GFP_NOIO,
+			buf_pages(n_ondisk, btree_bytes(c)),
+			&c->btree_bio);
+	bio_set_dev(bio, ca->disk_sb.bdev);
+	bio->bi_opf		= REQ_OP_READ|REQ_META;
+	bio->bi_iter.bi_sector	= pick.ptr.offset;
+	bch2_bio_map(bio, n_ondisk, btree_bytes(c));
+
+	submit_bio_wait(bio);
+
+	bio_put(bio);
+	percpu_ref_put(&ca->io_ref);
+
+	while (offset < c->opts.btree_node_size) {
+		struct bset *i;
+		struct nonce nonce;
+		struct bch_csum csum;
+		struct bkey_packed *k;
+		unsigned sectors;
+
+		if (!offset) {
+			i = &n_ondisk->keys;
+
+			if (!bch2_checksum_type_valid(c, BSET_CSUM_TYPE(i)))
+				die("unknown checksum type");
+
+			nonce = btree_nonce(i, offset << 9);
+			csum = csum_vstruct(c, BSET_CSUM_TYPE(i), nonce, n_ondisk);
+
+			if (bch2_crc_cmp(csum, n_ondisk->csum))
+				die("invalid checksum\n");
+
+			bset_encrypt(c, i, offset << 9);
+
+			sectors = vstruct_sectors(n_ondisk, c->block_bits);
+		} else {
+			struct btree_node_entry *bne = (void *) n_ondisk + (offset << 9);
+
+			i = &bne->keys;
+
+			if (i->seq != n_ondisk->keys.seq)
+				break;
+
+			if (!bch2_checksum_type_valid(c, BSET_CSUM_TYPE(i)))
+				die("unknown checksum type");
+
+			nonce = btree_nonce(i, offset << 9);
+			csum = csum_vstruct(c, BSET_CSUM_TYPE(i), nonce, bne);
+
+			if (bch2_crc_cmp(csum, bne->csum))
+				die("invalid checksum");
+
+			bset_encrypt(c, i, offset << 9);
+
+			sectors = vstruct_sectors(bne, c->block_bits);
+		}
+
+		fprintf(stdout, "  offset %u journal seq %llu\n",
+			offset, le64_to_cpu(i->journal_seq));
+		offset += sectors;
+
+		for (k = i->start;
+		     k != vstruct_last(i);
+		     k = bkey_next_skip_noops(k, vstruct_last(i))) {
+			struct bkey u;
+			char buf[4096];
+
+			bch2_bkey_val_to_text(&PBUF(buf), c, bkey_disassemble(b, k, &u));
+			fprintf(stdout, "    %s\n", buf);
+		}
+	}
+
+	free(n_ondisk);
+}
+
+static void list_nodes_ondisk(struct bch_fs *c, enum btree_id btree_id,
+			      struct bpos start, struct bpos end)
+{
+	struct btree_trans trans;
+	struct btree_iter *iter;
+	struct btree *b;
+	char buf[4096];
+
+	bch2_trans_init(&trans, c, 0, 0);
+
+	for_each_btree_node(&trans, iter, btree_id, start, 0, b) {
+		if (bkey_cmp(b->key.k.p, end) > 0)
+			break;
+
+		bch2_bkey_val_to_text(&PBUF(buf), c, bkey_i_to_s_c(&b->key));
+		fputs(buf, stdout);
+		putchar('\n');
+
+		print_node_ondisk(c, b);
+	}
+	bch2_trans_exit(&trans);
+}
+
 static void list_nodes_keys(struct bch_fs *c, enum btree_id btree_id,
 			    struct bpos start, struct bpos end)
 {
@@ -306,6 +427,7 @@ static const char * const list_modes[] = {
 	"keys",
 	"formats",
 	"nodes",
+	"nodes_ondisk",
 	"nodes_keys",
 	NULL
 };
@@ -383,6 +505,9 @@ int cmd_list(int argc, char *argv[])
 			list_nodes(c, btree_id, start, end);
 			break;
 		case 3:
+			list_nodes_ondisk(c, btree_id, start, end);
+			break;
+		case 4:
 			list_nodes_keys(c, btree_id, start, end);
 			break;
 		default:

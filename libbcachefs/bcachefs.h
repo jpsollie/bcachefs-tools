@@ -202,7 +202,8 @@
 #include "opts.h"
 #include "util.h"
 
-#include <linux/dynamic_fault.h>
+#define dynamic_fault(...)		0
+#define race_fault(...)			0
 
 #define bch2_fs_init_fault(name)					\
 	dynamic_fault("bcachefs:bch_fs_init:" name)
@@ -450,13 +451,6 @@ struct bch_dev {
 	}			allocator_state;
 
 	alloc_heap		alloc_heap;
-
-	/* Copying GC: */
-	struct task_struct	*copygc_thread;
-	copygc_heap		copygc_heap;
-	struct bch_pd_controller copygc_pd;
-	struct write_point	copygc_write_point;
-	u64			copygc_threshold;
 
 	atomic64_t		rebalance_work;
 
@@ -751,16 +745,27 @@ struct bch_fs {
 	/* REBALANCE */
 	struct bch_fs_rebalance	rebalance;
 
+	/* COPYGC */
+	struct task_struct	*copygc_thread;
+	copygc_heap		copygc_heap;
+	struct bch_pd_controller copygc_pd;
+	struct write_point	copygc_write_point;
+	u64			copygc_threshold;
+
 	/* STRIPES: */
 	GENRADIX(struct stripe) stripes[2];
-	struct mutex		ec_stripe_create_lock;
 
 	ec_stripes_heap		ec_stripes_heap;
 	spinlock_t		ec_stripes_heap_lock;
 
 	/* ERASURE CODING */
-	struct list_head	ec_new_stripe_list;
-	struct mutex		ec_new_stripe_lock;
+	struct list_head	ec_stripe_head_list;
+	struct mutex		ec_stripe_head_lock;
+
+	struct list_head	ec_stripe_new_list;
+	struct mutex		ec_stripe_new_lock;
+
+	struct work_struct	ec_stripe_create_work;
 	u64			ec_stripe_hint;
 
 	struct bio_set		ec_bioset;

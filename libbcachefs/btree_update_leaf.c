@@ -264,23 +264,12 @@ static inline int bch2_trans_journal_res_get(struct btree_trans *trans,
 static enum btree_insert_ret
 btree_key_can_insert(struct btree_trans *trans,
 		     struct btree_iter *iter,
-		     struct bkey_i *insert,
 		     unsigned u64s)
 {
 	struct bch_fs *c = trans->c;
 	struct btree *b = iter_l(iter)->b;
 
-	if (unlikely(btree_node_fake(b)))
-		return BTREE_INSERT_BTREE_NODE_FULL;
-
-	/*
-	 * old bch2_extent_sort_fix_overlapping() algorithm won't work with new
-	 * style extent updates:
-	 */
-	if (unlikely(btree_node_old_extent_overwrite(b)))
-		return BTREE_INSERT_BTREE_NODE_FULL;
-
-	if (unlikely(u64s > bch_btree_keys_u64s_remaining(c, b)))
+	if (!bch2_btree_node_insert_fits(c, b, u64s))
 		return BTREE_INSERT_BTREE_NODE_FULL;
 
 	return BTREE_INSERT_OK;
@@ -289,7 +278,6 @@ btree_key_can_insert(struct btree_trans *trans,
 static enum btree_insert_ret
 btree_key_can_insert_cached(struct btree_trans *trans,
 			    struct btree_iter *iter,
-			    struct bkey_i *insert,
 			    unsigned u64s)
 {
 	struct bkey_cached *ck = (void *) iter->l[0].b;
@@ -407,8 +395,8 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 
 		u64s += i->k->k.u64s;
 		ret = btree_iter_type(i->iter) != BTREE_ITER_CACHED
-			? btree_key_can_insert(trans, i->iter, i->k, u64s)
-			: btree_key_can_insert_cached(trans, i->iter, i->k, u64s);
+			? btree_key_can_insert(trans, i->iter, u64s)
+			: btree_key_can_insert_cached(trans, i->iter, u64s);
 		if (ret) {
 			*stopped_at = i;
 			return ret;

@@ -52,6 +52,15 @@ int blk_status_to_errno(blk_status_t status)
 	return blk_errors[idx].err;
 }
 
+const char *blk_status_to_str(blk_status_t status)
+{
+	int idx = (__force int)status;
+
+	if (WARN_ON_ONCE(idx >= ARRAY_SIZE(blk_errors)))
+		return "(invalid error)";
+	return blk_errors[idx].name;
+}
+
 void bio_copy_data_iter(struct bio *dst, struct bvec_iter *dst_iter,
 			struct bio *src, struct bvec_iter *src_iter)
 {

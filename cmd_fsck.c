@@ -67,25 +67,36 @@ int cmd_fsck(int argc, char *argv[])
 			break;
 		case 'h':
 			usage();
-			exit(EXIT_SUCCESS);
+			exit(16);
 		}
 	args_shift(optind);
 
-	if (!argc)
-		die("Please supply device(s) to check");
+	if (!argc) {
+		fprintf(stderr, "Please supply device(s) to check\n");
+		exit(8);
+	}
 
-	for (i = 0; i < argc; i++)
-		if (dev_mounted_rw(argv[i]))
-			die("%s is mounted read-write - aborting", argv[i]);
+	for (i = 0; i < argc; i++) {
+		switch (dev_mounted(argv[i])) {
+		case 1:
+			ret |= 2;
+			break;
+		case 2:
+			fprintf(stderr, "%s is mounted read-write - aborting\n", argv[i]);
+			exit(8);
+		}
+	}
 
 	struct bch_fs *c = bch2_fs_open(argv, argc, opts);
-	if (IS_ERR(c))
-		die("error opening %s: %s", argv[0], strerror(-PTR_ERR(c)));
+	if (IS_ERR(c)) {
+		fprintf(stderr, "error opening %s: %s\n", argv[0], strerror(-PTR_ERR(c)));
+		exit(8);
+	}
 
 	if (test_bit(BCH_FS_ERRORS_FIXED, &c->flags))
-		ret = 2;
+		ret |= 1;
 	if (test_bit(BCH_FS_ERROR, &c->flags))
-		ret = 4;
+		ret |= 4;
 
 	bch2_fs_stop(c);
 	return ret;

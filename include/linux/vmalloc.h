@@ -12,7 +12,7 @@
 
 #define vfree(p)		free(p)
 
-static inline void *__vmalloc(unsigned long size, gfp_t gfp_mask, unsigned prot)
+static inline void *__vmalloc(unsigned long size, gfp_t gfp_mask)
 {
 	void *p;
 
@@ -22,26 +22,36 @@ static inline void *__vmalloc(unsigned long size, gfp_t gfp_mask, unsigned prot)
 	if (!p)
 		return NULL;
 
-	if (prot == PAGE_KERNEL_EXEC &&
-	    mprotect(p, size, PROT_READ|PROT_WRITE|PROT_EXEC)) {
-		vfree(p);
-		return NULL;
-	}
-
 	if (gfp_mask & __GFP_ZERO)
 		memset(p, 0, size);
 
 	return p;
 }
 
+static inline void *vmalloc_exec(unsigned long size, gfp_t gfp_mask)
+{
+	void *p;
+
+	p = __vmalloc(size, gfp_mask);
+	if (!p)
+		return NULL;
+
+	if (mprotect(p, size, PROT_READ|PROT_WRITE|PROT_EXEC)) {
+		vfree(p);
+		return NULL;
+	}
+
+	return p;
+}
+
 static inline void *vmalloc(unsigned long size)
 {
-	return __vmalloc(size, GFP_KERNEL, PAGE_KERNEL);
+	return __vmalloc(size, GFP_KERNEL);
 }
 
 static inline void *vzalloc(unsigned long size)
 {
-	return __vmalloc(size, GFP_KERNEL|__GFP_ZERO, PAGE_KERNEL);
+	return __vmalloc(size, GFP_KERNEL|__GFP_ZERO);
 }
 
 #endif /* __TOOLS_LINUX_VMALLOC_H */

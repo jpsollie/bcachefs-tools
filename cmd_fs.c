@@ -42,7 +42,7 @@ static void print_dev_usage(struct bchfs_handle fs,
 	printf("%-20s%12s%12s%12s\n",
 	       "", "data", "buckets", "fragmented");
 
-	for (i = BCH_DATA_SB; i < BCH_DATA_NR; i++) {
+	for (i = BCH_DATA_sb; i < BCH_DATA_NR; i++) {
 		print_dev_usage_type(bch2_data_types[i],
 				     u.bucket_size,
 				     u.buckets[i],
@@ -162,21 +162,21 @@ static void print_fs_usage(const char *path, enum units units)
 	struct bch_replicas_usage *r;
 
 	for_each_usage_replica(u, r)
-		if (r->r.data_type < BCH_DATA_USER)
+		if (r->r.data_type < BCH_DATA_user)
 			print_replicas_usage(r, &dev_names, units);
 
 	for_each_usage_replica(u, r)
-		if (r->r.data_type == BCH_DATA_USER &&
+		if (r->r.data_type == BCH_DATA_user &&
 		    r->r.nr_required <= 1)
 			print_replicas_usage(r, &dev_names, units);
 
 	for_each_usage_replica(u, r)
-		if (r->r.data_type == BCH_DATA_USER &&
+		if (r->r.data_type == BCH_DATA_user &&
 		    r->r.nr_required > 1)
 			print_replicas_usage(r, &dev_names, units);
 
 	for_each_usage_replica(u, r)
-		if (r->r.data_type > BCH_DATA_USER)
+		if (r->r.data_type > BCH_DATA_user)
 			print_replicas_usage(r, &dev_names, units);
 
 	free(u);
