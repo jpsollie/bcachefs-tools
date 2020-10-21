@@ -1448,7 +1448,7 @@ static int __bch2_stripe_write_key(struct btree_trans *trans,
 	return 0;
 }
 
-int bch2_stripes_write(struct bch_fs *c, unsigned flags, bool *wrote)
+int bch2_stripes_write(struct bch_fs *c, unsigned flags)
 {
 	struct btree_trans trans;
 	struct btree_iter *iter;
@@ -1476,8 +1476,6 @@ int bch2_stripes_write(struct bch_fs *c, unsigned flags, bool *wrote)
 
 		if (ret)
 			break;
-
-		*wrote = true;
 	}
 
 	bch2_trans_exit(&trans);
@@ -1497,7 +1495,6 @@ static int bch2_stripes_read_fn(struct bch_fs *c, enum btree_id id,
 
 		ret = __ec_stripe_mem_alloc(c, k.k->p.offset, GFP_KERNEL) ?:
 			bch2_mark_key(c, k, 0, 0, NULL, 0,
-				      BTREE_TRIGGER_ALLOC_READ|
 				      BTREE_TRIGGER_NOATOMIC);
 		if (ret)
 			return ret;

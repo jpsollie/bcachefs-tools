@@ -149,44 +149,6 @@ struct bch_fs *bch2_uuid_to_fs(uuid_le uuid)
 	return c;
 }
 
-int bch2_congested(void *data, int bdi_bits)
-{
-	struct bch_fs *c = data;
-	struct backing_dev_info *bdi;
-	struct bch_dev *ca;
-	unsigned i;
-	int ret = 0;
-
-	rcu_read_lock();
-	if (bdi_bits & (1 << WB_sync_congested)) {
-		/* Reads - check all devices: */
-		for_each_readable_member(ca, c, i) {
-			bdi = ca->disk_sb.bdev->bd_bdi;
-
-			if (bdi_congested(bdi, bdi_bits)) {
-				ret = 1;
-				break;
-			}
-		}
-	} else {
-		const struct bch_devs_mask *devs =
-			bch2_target_to_mask(c, c->opts.foreground_target) ?:
-			&c->rw_devs[BCH_DATA_user];
-
-		for_each_member_device_rcu(ca, c, i, devs) {
-			bdi = ca->disk_sb.bdev->bd_bdi;
-
-			if (bdi_congested(bdi, bdi_bits)) {
-				ret = 1;
-				break;
-			}
-		}
-	}
-	rcu_read_unlock();
-
-	return ret;
-}
-
 /* Filesystem RO/RW: */
 
 /*
@@ -207,9 +169,7 @@ int bch2_congested(void *data, int bdi_bits)
 static void __bch2_fs_read_only(struct bch_fs *c)
 {
 	struct bch_dev *ca;
-	bool wrote = false;
 	unsigned i, clean_passes = 0;
-	int ret;
 
 	bch2_rebalance_stop(c);
 	bch2_copygc_stop(c);
@@ -226,20 +186,6 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 	 * write out alloc info aren't going to work:
 	 */
 	if (!test_bit(BCH_FS_ALLOCATOR_RUNNING, &c->flags))
-		goto nowrote_alloc;
-
-	bch_verbose(c, "writing alloc info");
-	/*
-	 * This should normally just be writing the bucket read/write clocks:
-	 */
-	ret = bch2_stripes_write(c, BTREE_INSERT_NOCHECK_RW, &wrote) ?:
-		bch2_alloc_write(c, BTREE_INSERT_NOCHECK_RW, &wrote);
-	bch_verbose(c, "writing alloc info complete");
-
-	if (ret && !test_bit(BCH_FS_EMERGENCY_RO, &c->flags))
-		bch2_fs_inconsistent(c, "error writing out alloc info %i", ret);
-
-	if (ret)
 		goto nowrote_alloc;
 
 	bch_verbose(c, "flushing journal and stopping allocators");
@@ -277,6 +223,9 @@ nowrote_alloc:
 
 	for_each_member_device(ca, c, i)
 		bch2_dev_allocator_stop(ca);
+
+	bch2_io_timer_del(&c->io_clock[READ], &c->bucket_clock[READ].rescale);
+	bch2_io_timer_del(&c->io_clock[WRITE], &c->bucket_clock[WRITE].rescale);
 
 	clear_bit(BCH_FS_ALLOCATOR_RUNNING, &c->flags);
 	clear_bit(BCH_FS_ALLOCATOR_STOPPING, &c->flags);
@@ -454,6 +403,9 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 		bch2_dev_allocator_add(c, ca);
 	bch2_recalc_capacity(c);
 
+	bch2_io_timer_add(&c->io_clock[READ], &c->bucket_clock[READ].rescale);
+	bch2_io_timer_add(&c->io_clock[WRITE], &c->bucket_clock[WRITE].rescale);
+
 	for_each_rw_member(ca, c, i) {
 		ret = bch2_dev_allocator_start(ca);
 		if (ret) {
@@ -496,7 +448,7 @@ int bch2_fs_read_write_early(struct bch_fs *c)
 
 /* Filesystem startup/shutdown: */
 
-static void bch2_fs_free(struct bch_fs *c)
+static void __bch2_fs_free(struct bch_fs *c)
 {
 	unsigned i;
 
@@ -552,10 +504,10 @@ static void bch2_fs_release(struct kobject *kobj)
 {
 	struct bch_fs *c = container_of(kobj, struct bch_fs, kobj);
 
-	bch2_fs_free(c);
+	__bch2_fs_free(c);
 }
 
-void bch2_fs_stop(struct bch_fs *c)
+void __bch2_fs_stop(struct bch_fs *c)
 {
 	struct bch_dev *ca;
 	unsigned i;
@@ -586,13 +538,6 @@ void bch2_fs_stop(struct bch_fs *c)
 	kobject_put(&c->opts_dir);
 	kobject_put(&c->internal);
 
-	mutex_lock(&bch_fs_list_lock);
-	list_del(&c->list);
-	mutex_unlock(&bch_fs_list_lock);
-
-	closure_sync(&c->cl);
-	closure_debug_destroy(&c->cl);
-
 	/* btree prefetch might have kicked off reads in the background: */
 	bch2_btree_flush_all_reads(c);
 
@@ -605,11 +550,33 @@ void bch2_fs_stop(struct bch_fs *c)
 
 	for (i = 0; i < c->sb.nr_devices; i++)
 		if (c->devs[i])
+			bch2_free_super(&c->devs[i]->disk_sb);
+}
+
+void bch2_fs_free(struct bch_fs *c)
+{
+	unsigned i;
+
+	mutex_lock(&bch_fs_list_lock);
+	list_del(&c->list);
+	mutex_unlock(&bch_fs_list_lock);
+
+	closure_sync(&c->cl);
+	closure_debug_destroy(&c->cl);
+
+	for (i = 0; i < c->sb.nr_devices; i++)
+		if (c->devs[i])
 			bch2_dev_free(rcu_dereference_protected(c->devs[i], 1));
 
 	bch_verbose(c, "shutdown complete");
 
 	kobject_put(&c->kobj);
+}
+
+void bch2_fs_stop(struct bch_fs *c)
+{
+	__bch2_fs_stop(c);
+	bch2_fs_free(c);
 }
 
 static const char *bch2_fs_online(struct bch_fs *c)
@@ -668,6 +635,14 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 		goto out;
 
 	__module_get(THIS_MODULE);
+
+	closure_init(&c->cl, NULL);
+
+	c->kobj.kset = bcachefs_kset;
+	kobject_init(&c->kobj, &bch2_fs_ktype);
+	kobject_init(&c->internal, &bch2_fs_internal_ktype);
+	kobject_init(&c->opts_dir, &bch2_fs_opts_dir_ktype);
+	kobject_init(&c->time_stats, &bch2_fs_time_stats_ktype);
 
 	c->minor		= -1;
 	c->disk_sb.fs_sb	= true;
@@ -799,18 +774,6 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 		    bch2_dev_alloc(c, i))
 			goto err;
 
-	/*
-	 * Now that all allocations have succeeded, init various refcounty
-	 * things that let us shutdown:
-	 */
-	closure_init(&c->cl, NULL);
-
-	c->kobj.kset = bcachefs_kset;
-	kobject_init(&c->kobj, &bch2_fs_ktype);
-	kobject_init(&c->internal, &bch2_fs_internal_ktype);
-	kobject_init(&c->opts_dir, &bch2_fs_opts_dir_ktype);
-	kobject_init(&c->time_stats, &bch2_fs_time_stats_ktype);
-
 	mutex_lock(&bch_fs_list_lock);
 	err = bch2_fs_online(c);
 	mutex_unlock(&bch_fs_list_lock);
@@ -905,6 +868,13 @@ int bch2_fs_start(struct bch_fs *c)
 		goto err;
 
 	set_bit(BCH_FS_STARTED, &c->flags);
+
+	/*
+	 * Allocator threads don't start filling copygc reserve until after we
+	 * set BCH_FS_STARTED - wake them now:
+	 */
+	for_each_online_member(ca, c, i)
+		bch2_wake_allocator(ca);
 
 	if (c->opts.read_only || c->opts.nochanges) {
 		bch2_fs_read_only(c);
@@ -1683,6 +1653,11 @@ have_slot:
 	bch2_write_super(c);
 	mutex_unlock(&c->sb_lock);
 
+	err = "alloc write failed";
+	ret = bch2_dev_alloc_write(c, ca, 0);
+	if (ret)
+		goto err;
+
 	if (ca->mi.state == BCH_MEMBER_STATE_RW) {
 		err = __bch2_dev_read_write(c, ca);
 		if (err)
@@ -1826,7 +1801,6 @@ err:
 /* return with ref on ca->ref: */
 struct bch_dev *bch2_dev_lookup(struct bch_fs *c, const char *path)
 {
-
 	struct block_device *bdev = lookup_bdev(path);
 	struct bch_dev *ca;
 	unsigned i;
@@ -1851,6 +1825,7 @@ struct bch_fs *bch2_fs_open(char * const *devices, unsigned nr_devices,
 {
 	struct bch_sb_handle *sb = NULL;
 	struct bch_fs *c = NULL;
+	struct bch_sb_field_members *mi;
 	unsigned i, best_sb = 0;
 	const char *err;
 	int ret = -ENOMEM;
@@ -1886,10 +1861,24 @@ struct bch_fs *bch2_fs_open(char * const *devices, unsigned nr_devices,
 		    le64_to_cpu(sb[best_sb].sb->seq))
 			best_sb = i;
 
-	for (i = 0; i < nr_devices; i++) {
+	mi = bch2_sb_get_members(sb[best_sb].sb);
+
+	i = 0;
+	while (i < nr_devices) {
+		if (i != best_sb &&
+		    !bch2_dev_exists(sb[best_sb].sb, mi, sb[i].sb->dev_idx)) {
+			char buf[BDEVNAME_SIZE];
+			pr_info("%s has been removed, skipping",
+				bdevname(sb[i].bdev, buf));
+			bch2_free_super(&sb[i]);
+			array_remove_item(sb, nr_devices, i);
+			continue;
+		}
+
 		err = bch2_dev_in_fs(sb[best_sb].sb, sb[i].sb);
 		if (err)
 			goto err_print;
+		i++;
 	}
 
 	ret = -ENOMEM;

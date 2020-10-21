@@ -28,6 +28,8 @@ struct bkey_alloc_unpacked bch2_alloc_unpack(struct bkey_s_c);
 void bch2_alloc_pack(struct bkey_i_alloc *,
 		     const struct bkey_alloc_unpacked);
 
+int bch2_bucket_io_time_reset(struct btree_trans *, unsigned, size_t, int);
+
 static inline struct bkey_alloc_unpacked
 alloc_mem_to_key(struct bucket *g, struct bucket_mark m)
 {
@@ -61,8 +63,10 @@ static inline void bch2_wake_allocator(struct bch_dev *ca)
 
 	rcu_read_lock();
 	p = rcu_dereference(ca->alloc_thread);
-	if (p)
+	if (p) {
 		wake_up_process(p);
+		ca->allocator_state = ALLOCATOR_RUNNING;
+	}
 	rcu_read_unlock();
 }
 
@@ -91,7 +95,8 @@ void bch2_dev_allocator_quiesce(struct bch_fs *, struct bch_dev *);
 void bch2_dev_allocator_stop(struct bch_dev *);
 int bch2_dev_allocator_start(struct bch_dev *);
 
-int bch2_alloc_write(struct bch_fs *, unsigned, bool *);
+int bch2_dev_alloc_write(struct bch_fs *, struct bch_dev *, unsigned);
+int bch2_alloc_write(struct bch_fs *, unsigned);
 void bch2_fs_allocator_background_init(struct bch_fs *);
 
 #endif /* _BCACHEFS_ALLOC_BACKGROUND_H */

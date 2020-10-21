@@ -4,6 +4,7 @@ INSTALL=install
 PYTEST=pytest-3
 CFLAGS+=-std=gnu89 -O2 -MMD -Wall				\
 	-Wno-pointer-sign					\
+	-Wno-zero-length-bounds					\
 	-fno-strict-aliasing					\
 	-fno-delete-null-pointer-checks				\
 	-I. -Iinclude -Iraid					\

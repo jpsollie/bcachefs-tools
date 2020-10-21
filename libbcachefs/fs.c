@@ -38,7 +38,8 @@ static void bch2_vfs_inode_init(struct bch_fs *,
 				struct bch_inode_info *,
 				struct bch_inode_unpacked *);
 
-static void journal_seq_copy(struct bch_inode_info *dst,
+static void journal_seq_copy(struct bch_fs *c,
+			     struct bch_inode_info *dst,
 			     u64 journal_seq)
 {
 	u64 old, v = READ_ONCE(dst->ei_journal_seq);
@@ -49,6 +50,8 @@ static void journal_seq_copy(struct bch_inode_info *dst,
 		if (old >= journal_seq)
 			break;
 	} while ((v = cmpxchg(&dst->ei_journal_seq, old, journal_seq)) != old);
+
+	bch2_journal_set_has_inum(&c->journal, dst->v.i_ino, journal_seq);
 }
 
 static void __pagecache_lock_put(struct pagecache_lock *lock, long i)
@@ -285,12 +288,12 @@ err_before_quota:
 	if (!tmpfile) {
 		bch2_inode_update_after_write(c, dir, &dir_u,
 					      ATTR_MTIME|ATTR_CTIME);
-		journal_seq_copy(dir, journal_seq);
+		journal_seq_copy(c, dir, journal_seq);
 		mutex_unlock(&dir->ei_update_lock);
 	}
 
 	bch2_vfs_inode_init(c, inode, &inode_u);
-	journal_seq_copy(inode, journal_seq);
+	journal_seq_copy(c, inode, journal_seq);
 
 	set_cached_acl(&inode->v, ACL_TYPE_ACCESS, acl);
 	set_cached_acl(&inode->v, ACL_TYPE_DEFAULT, default_acl);
@@ -307,7 +310,7 @@ err_before_quota:
 		 * We raced, another process pulled the new inode into cache
 		 * before us:
 		 */
-		journal_seq_copy(old, journal_seq);
+		journal_seq_copy(c, old, journal_seq);
 		make_bad_inode(&inode->v);
 		iput(&inode->v);
 
@@ -401,7 +404,7 @@ static int __bch2_link(struct bch_fs *c,
 	if (likely(!ret)) {
 		BUG_ON(inode_u.bi_inum != inode->v.i_ino);
 
-		journal_seq_copy(inode, dir->ei_journal_seq);
+		journal_seq_copy(c, inode, dir->ei_journal_seq);
 		bch2_inode_update_after_write(c, dir, &dir_u,
 					      ATTR_MTIME|ATTR_CTIME);
 		bch2_inode_update_after_write(c, inode, &inode_u, ATTR_CTIME);
@@ -458,7 +461,7 @@ static int bch2_unlink(struct inode *vdir, struct dentry *dentry)
 	if (likely(!ret)) {
 		BUG_ON(inode_u.bi_inum != inode->v.i_ino);
 
-		journal_seq_copy(inode, dir->ei_journal_seq);
+		journal_seq_copy(c, inode, dir->ei_journal_seq);
 		bch2_inode_update_after_write(c, dir, &dir_u,
 					      ATTR_MTIME|ATTR_CTIME);
 		bch2_inode_update_after_write(c, inode, &inode_u,
@@ -493,7 +496,7 @@ static int bch2_symlink(struct inode *vdir, struct dentry *dentry,
 	if (unlikely(ret))
 		goto err;
 
-	journal_seq_copy(dir, inode->ei_journal_seq);
+	journal_seq_copy(c, dir, inode->ei_journal_seq);
 
 	ret = __bch2_link(c, inode, dir, dentry);
 	if (unlikely(ret))
@@ -591,22 +594,22 @@ retry:
 
 	bch2_inode_update_after_write(c, src_dir, &src_dir_u,
 				      ATTR_MTIME|ATTR_CTIME);
-	journal_seq_copy(src_dir, journal_seq);
+	journal_seq_copy(c, src_dir, journal_seq);
 
 	if (src_dir != dst_dir) {
 		bch2_inode_update_after_write(c, dst_dir, &dst_dir_u,
 					      ATTR_MTIME|ATTR_CTIME);
-		journal_seq_copy(dst_dir, journal_seq);
+		journal_seq_copy(c, dst_dir, journal_seq);
 	}
 
 	bch2_inode_update_after_write(c, src_inode, &src_inode_u,
 				      ATTR_CTIME);
-	journal_seq_copy(src_inode, journal_seq);
+	journal_seq_copy(c, src_inode, journal_seq);
 
 	if (dst_inode) {
 		bch2_inode_update_after_write(c, dst_inode, &dst_inode_u,
 					      ATTR_CTIME);
-		journal_seq_copy(dst_inode, journal_seq);
+		journal_seq_copy(c, dst_inode, journal_seq);
 	}
 err:
 	bch2_trans_exit(&trans);
@@ -1278,91 +1281,36 @@ static struct bch_fs *bch2_path_to_fs(const char *dev)
 
 	c = bch2_bdev_to_fs(bdev);
 	bdput(bdev);
+	if (c)
+		closure_put(&c->cl);
 	return c ?: ERR_PTR(-ENOENT);
 }
 
-static struct bch_fs *__bch2_open_as_blockdevs(const char *dev_name, char * const *devs,
-					       unsigned nr_devs, struct bch_opts opts)
-{
-	struct bch_fs *c, *c1, *c2;
-	size_t i;
-
-	if (!nr_devs)
-		return ERR_PTR(-EINVAL);
-
-	c = bch2_fs_open(devs, nr_devs, opts);
-
-	if (IS_ERR(c) && PTR_ERR(c) == -EBUSY) {
-		/*
-		 * Already open?
-		 * Look up each block device, make sure they all belong to a
-		 * filesystem and they all belong to the _same_ filesystem
-		 */
-
-		c1 = bch2_path_to_fs(devs[0]);
-		if (IS_ERR(c1))
-			return c;
-
-		for (i = 1; i < nr_devs; i++) {
-			c2 = bch2_path_to_fs(devs[i]);
-			if (!IS_ERR(c2))
-				closure_put(&c2->cl);
-
-			if (c1 != c2) {
-				closure_put(&c1->cl);
-				return c;
-			}
-		}
-
-		c = c1;
-	}
-
-	if (IS_ERR(c))
-		return c;
-
-	down_write(&c->state_lock);
-
-	if (!test_bit(BCH_FS_STARTED, &c->flags)) {
-		up_write(&c->state_lock);
-		closure_put(&c->cl);
-		pr_err("err mounting %s: incomplete filesystem", dev_name);
-		return ERR_PTR(-EINVAL);
-	}
-
-	up_write(&c->state_lock);
-
-	set_bit(BCH_FS_BDEV_MOUNTED, &c->flags);
-	return c;
-}
-
-static struct bch_fs *bch2_open_as_blockdevs(const char *_dev_name,
-					     struct bch_opts opts)
+static char **split_devs(const char *_dev_name, unsigned *nr)
 {
 	char *dev_name = NULL, **devs = NULL, *s;
-	struct bch_fs *c = ERR_PTR(-ENOMEM);
 	size_t i, nr_devs = 0;
 
 	dev_name = kstrdup(_dev_name, GFP_KERNEL);
 	if (!dev_name)
-		goto err;
+		return NULL;
 
 	for (s = dev_name; s; s = strchr(s + 1, ':'))
 		nr_devs++;
 
-	devs = kcalloc(nr_devs, sizeof(const char *), GFP_KERNEL);
-	if (!devs)
-		goto err;
+	devs = kcalloc(nr_devs + 1, sizeof(const char *), GFP_KERNEL);
+	if (!devs) {
+		kfree(dev_name);
+		return NULL;
+	}
 
 	for (i = 0, s = dev_name;
 	     s;
 	     (s = strchr(s, ':')) && (*s++ = '\0'))
 		devs[i++] = s;
 
-	c = __bch2_open_as_blockdevs(_dev_name, devs, nr_devs, opts);
-err:
-	kfree(devs);
-	kfree(dev_name);
-	return c;
+	*nr = nr_devs;
+	return devs;
 }
 
 static int bch2_remount(struct super_block *sb, int *flags, char *data)
@@ -1406,6 +1354,24 @@ static int bch2_remount(struct super_block *sb, int *flags, char *data)
 	return ret;
 }
 
+static int bch2_show_devname(struct seq_file *seq, struct dentry *root)
+{
+	struct bch_fs *c = root->d_sb->s_fs_info;
+	struct bch_dev *ca;
+	unsigned i;
+	bool first = true;
+
+	for_each_online_member(ca, c, i) {
+		if (!first)
+			seq_putc(seq, ':');
+		first = false;
+		seq_puts(seq, "/dev/");
+		seq_puts(seq, ca->name);
+	}
+
+	return 0;
+}
+
 static int bch2_show_options(struct seq_file *seq, struct dentry *root)
 {
 	struct bch_fs *c = root->d_sb->s_fs_info;
@@ -1429,7 +1395,13 @@ static int bch2_show_options(struct seq_file *seq, struct dentry *root)
 	}
 
 	return 0;
+}
 
+static void bch2_put_super(struct super_block *sb)
+{
+	struct bch_fs *c = sb->s_fs_info;
+
+	__bch2_fs_stop(c);
 }
 
 static const struct super_operations bch_super_operations = {
@@ -1439,24 +1411,40 @@ static const struct super_operations bch_super_operations = {
 	.evict_inode	= bch2_evict_inode,
 	.sync_fs	= bch2_sync_fs,
 	.statfs		= bch2_statfs,
+	.show_devname	= bch2_show_devname,
 	.show_options	= bch2_show_options,
 	.remount_fs	= bch2_remount,
-#if 0
 	.put_super	= bch2_put_super,
+#if 0
 	.freeze_fs	= bch2_freeze,
 	.unfreeze_fs	= bch2_unfreeze,
 #endif
 };
 
-static int bch2_test_super(struct super_block *s, void *data)
-{
-	return s->s_fs_info == data;
-}
-
 static int bch2_set_super(struct super_block *s, void *data)
 {
 	s->s_fs_info = data;
 	return 0;
+}
+
+static int bch2_noset_super(struct super_block *s, void *data)
+{
+	return -EBUSY;
+}
+
+static int bch2_test_super(struct super_block *s, void *data)
+{
+	struct bch_fs *c = s->s_fs_info;
+	struct bch_fs **devs = data;
+	unsigned i;
+
+	if (!c)
+		return false;
+
+	for (i = 0; devs[i]; i++)
+		if (c != devs[i])
+			return false;
+	return true;
 }
 
 static struct dentry *bch2_mount(struct file_system_type *fs_type,
@@ -1467,7 +1455,9 @@ static struct dentry *bch2_mount(struct file_system_type *fs_type,
 	struct super_block *sb;
 	struct inode *vinode;
 	struct bch_opts opts = bch2_opts_empty();
-	unsigned i;
+	char **devs;
+	struct bch_fs **devs_to_fs = NULL;
+	unsigned i, nr_devs;
 	int ret;
 
 	opt_set(opts, read_only, (flags & SB_RDONLY) != 0);
@@ -1476,21 +1466,41 @@ static struct dentry *bch2_mount(struct file_system_type *fs_type,
 	if (ret)
 		return ERR_PTR(ret);
 
-	c = bch2_open_as_blockdevs(dev_name, opts);
-	if (IS_ERR(c))
-		return ERR_CAST(c);
+	devs = split_devs(dev_name, &nr_devs);
+	if (!devs)
+		return ERR_PTR(-ENOMEM);
 
-	sb = sget(fs_type, bch2_test_super, bch2_set_super, flags|SB_NOSEC, c);
-	if (IS_ERR(sb)) {
-		closure_put(&c->cl);
-		return ERR_CAST(sb);
+	devs_to_fs = kcalloc(nr_devs + 1, sizeof(void *), GFP_KERNEL);
+	if (!devs_to_fs) {
+		sb = ERR_PTR(-ENOMEM);
+		goto got_sb;
 	}
 
-	BUG_ON(sb->s_fs_info != c);
+	for (i = 0; i < nr_devs; i++)
+		devs_to_fs[i] = bch2_path_to_fs(devs[i]);
+
+	sb = sget(fs_type, bch2_test_super, bch2_noset_super,
+		  flags|SB_NOSEC, devs_to_fs);
+	if (!IS_ERR(sb))
+		goto got_sb;
+
+	c = bch2_fs_open(devs, nr_devs, opts);
+
+	if (!IS_ERR(c))
+		sb = sget(fs_type, NULL, bch2_set_super, flags|SB_NOSEC, c);
+	else
+		sb = ERR_CAST(c);
+got_sb:
+	kfree(devs_to_fs);
+	kfree(devs[0]);
+	kfree(devs);
+
+	if (IS_ERR(sb))
+		return ERR_CAST(sb);
+
+	c = sb->s_fs_info;
 
 	if (sb->s_root) {
-		closure_put(&c->cl);
-
 		if ((flags ^ sb->s_flags) & SB_RDONLY) {
 			ret = -EBUSY;
 			goto err_put_super;
@@ -1517,8 +1527,6 @@ static struct dentry *bch2_mount(struct file_system_type *fs_type,
 	if (ret)
 		goto err_put_super;
 
-	sb->s_bdi->congested_fn		= bch2_congested;
-	sb->s_bdi->congested_data	= c;
 	sb->s_bdi->ra_pages		= VM_READAHEAD_PAGES;
 
 	for_each_online_member(ca, c, i) {
@@ -1565,11 +1573,7 @@ static void bch2_kill_sb(struct super_block *sb)
 	struct bch_fs *c = sb->s_fs_info;
 
 	generic_shutdown_super(sb);
-
-	if (test_bit(BCH_FS_BDEV_MOUNTED, &c->flags))
-		bch2_fs_stop(c);
-	else
-		closure_put(&c->cl);
+	bch2_fs_free(c);
 }
 
 static struct file_system_type bcache_fs_type = {
