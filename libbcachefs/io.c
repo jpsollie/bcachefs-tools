@@ -1475,7 +1475,8 @@ static struct promote_op *__promote_alloc(struct bch_fs *c,
 			opts,
 			DATA_PROMOTE,
 			(struct data_opts) {
-				.target = opts.promote_target
+				.target		= opts.promote_target,
+				.nr_replicas	= 1,
 			},
 			btree_id, k);
 	BUG_ON(ret);
@@ -1675,7 +1676,6 @@ retry:
 		unsigned bytes, sectors, offset_into_extent;
 
 		bkey_on_stack_reassemble(&sk, c, k);
-		k = bkey_i_to_s_c(sk.k);
 
 		offset_into_extent = iter->pos.offset -
 			bkey_start_offset(k.k);
@@ -1685,6 +1685,8 @@ retry:
 					&offset_into_extent, &sk);
 		if (ret)
 			break;
+
+		k = bkey_i_to_s_c(sk.k);
 
 		sectors = min(sectors, k.k->size - offset_into_extent);
 
@@ -2007,7 +2009,8 @@ int __bch2_read_indirect_extent(struct btree_trans *trans,
 	if (ret)
 		goto err;
 
-	if (k.k->type != KEY_TYPE_reflink_v) {
+	if (k.k->type != KEY_TYPE_reflink_v &&
+	    k.k->type != KEY_TYPE_indirect_inline_data) {
 		__bcache_io_error(trans->c,
 				"pointer to nonexistent indirect extent");
 		ret = -EIO;
@@ -2035,13 +2038,12 @@ int __bch2_read_extent(struct btree_trans *trans, struct bch_read_bio *orig,
 	struct bpos pos = bkey_start_pos(k.k);
 	int pick_ret;
 
-	if (k.k->type == KEY_TYPE_inline_data) {
-		struct bkey_s_c_inline_data d = bkey_s_c_to_inline_data(k);
+	if (bkey_extent_is_inline_data(k.k)) {
 		unsigned bytes = min_t(unsigned, iter.bi_size,
-				       bkey_val_bytes(d.k));
+				       bkey_inline_data_bytes(k.k));
 
 		swap(iter.bi_size, bytes);
-		memcpy_to_bio(&orig->bio, iter, d.v->data);
+		memcpy_to_bio(&orig->bio, iter, bkey_inline_data_p(k));
 		swap(iter.bi_size, bytes);
 		bio_advance_iter(&orig->bio, &iter, bytes);
 		zero_fill_bio_iter(&orig->bio, iter);
@@ -2313,12 +2315,13 @@ retry:
 		sectors = k.k->size - offset_into_extent;
 
 		bkey_on_stack_reassemble(&sk, c, k);
-		k = bkey_i_to_s_c(sk.k);
 
 		ret = bch2_read_indirect_extent(&trans,
 					&offset_into_extent, &sk);
 		if (ret)
 			goto err;
+
+		k = bkey_i_to_s_c(sk.k);
 
 		/*
 		 * With indirect extents, the amount of data to read is the min

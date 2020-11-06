@@ -175,6 +175,9 @@ static void __bch2_fs_read_only(struct bch_fs *c)
 	bch2_copygc_stop(c);
 	bch2_gc_thread_stop(c);
 
+	bch2_io_timer_del(&c->io_clock[READ], &c->bucket_clock[READ].rescale);
+	bch2_io_timer_del(&c->io_clock[WRITE], &c->bucket_clock[WRITE].rescale);
+
 	/*
 	 * Flush journal before stopping allocators, because flushing journal
 	 * blacklist entries involves allocating new btree nodes:
@@ -223,9 +226,6 @@ nowrote_alloc:
 
 	for_each_member_device(ca, c, i)
 		bch2_dev_allocator_stop(ca);
-
-	bch2_io_timer_del(&c->io_clock[READ], &c->bucket_clock[READ].rescale);
-	bch2_io_timer_del(&c->io_clock[WRITE], &c->bucket_clock[WRITE].rescale);
 
 	clear_bit(BCH_FS_ALLOCATOR_RUNNING, &c->flags);
 	clear_bit(BCH_FS_ALLOCATOR_STOPPING, &c->flags);

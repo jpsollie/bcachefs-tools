@@ -340,7 +340,8 @@ static inline void bkey_init(struct bkey *k)
 	x(reflink_p,		15)			\
 	x(reflink_v,		16)			\
 	x(inline_data,		17)			\
-	x(btree_ptr_v2,		18)
+	x(btree_ptr_v2,		18)			\
+	x(indirect_inline_data,	19)
 
 enum bch_bkey_type {
 #define x(name, nr) KEY_TYPE_##name	= nr,
@@ -886,6 +887,12 @@ struct bch_reflink_v {
 	__u64			_data[0];
 };
 
+struct bch_indirect_inline_data {
+	struct bch_val		v;
+	__le64			refcount;
+	u8			data[0];
+};
+
 /* Inline data */
 
 struct bch_inline_data {
@@ -1032,7 +1039,8 @@ LE64_BITMASK(BCH_KDF_SCRYPT_P,	struct bch_sb_field_crypt, kdf_flags, 32, 48);
 	x(journal,	2)		\
 	x(btree,	3)		\
 	x(user,		4)		\
-	x(cached,	5)
+	x(cached,	5)		\
+	x(parity,	6)
 
 enum bch_data_type {
 #define x(t, n) BCH_DATA_##t,
@@ -1321,7 +1329,8 @@ LE64_BITMASK(BCH_SB_ERASURE_CODE,	struct bch_sb, flags[3],  0, 16);
 	x(incompressible,		10)	\
 	x(btree_ptr_v2,			11)	\
 	x(extents_above_btree_updates,	12)	\
-	x(btree_updates_journalled,	13)
+	x(btree_updates_journalled,	13)	\
+	x(reflink_inline_data,		14)
 
 #define BCH_SB_FEATURES_ALL				\
 	((1ULL << BCH_FEATURE_new_siphash)|		\

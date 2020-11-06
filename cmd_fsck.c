@@ -55,7 +55,7 @@ int cmd_fsck(int argc, char *argv[])
 			/* force check, even if filesystem marked clean: */
 			break;
 		case 'o':
-			ret = bch2_parse_mount_opts(&opts, optarg);
+			ret = bch2_parse_mount_opts(NULL, &opts, optarg);
 			if (ret)
 				return ret;
 			break;
