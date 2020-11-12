@@ -42,6 +42,11 @@ static void journal_seq_copy(struct bch_fs *c,
 			     struct bch_inode_info *dst,
 			     u64 journal_seq)
 {
+	/*
+	 * atomic64_cmpxchg has a fallback for archs that don't support it,
+	 * cmpxchg does not:
+	 */
+	atomic64_t *dst_seq = (void *) &dst->ei_journal_seq;
 	u64 old, v = READ_ONCE(dst->ei_journal_seq);
 
 	do {
@@ -49,7 +54,7 @@ static void journal_seq_copy(struct bch_fs *c,
 
 		if (old >= journal_seq)
 			break;
-	} while ((v = cmpxchg(&dst->ei_journal_seq, old, journal_seq)) != old);
+	} while ((v = atomic64_cmpxchg(dst_seq, old, journal_seq)) != old);
 
 	bch2_journal_set_has_inum(&c->journal, dst->v.i_ino, journal_seq);
 }
@@ -225,6 +230,13 @@ struct inode *bch2_vfs_inode_get(struct bch_fs *c, u64 inum)
 	return &inode->v;
 }
 
+static int inum_test(struct inode *inode, void *p)
+{
+	unsigned long *ino = p;
+
+	return *ino == inode->i_ino;
+}
+
 static struct bch_inode_info *
 __bch2_create(struct bch_inode_info *dir, struct dentry *dentry,
 	      umode_t mode, dev_t rdev, bool tmpfile)
@@ -304,8 +316,12 @@ err_before_quota:
 	 * thread pulling the inode in and modifying it:
 	 */
 
-	old = to_bch_ei(insert_inode_locked2(&inode->v));
-	if (unlikely(old)) {
+	inode->v.i_state |= I_CREATING;
+	old = to_bch_ei(inode_insert5(&inode->v, inode->v.i_ino,
+				      inum_test, NULL, &inode->v.i_ino));
+	BUG_ON(!old);
+
+	if (unlikely(old != inode)) {
 		/*
 		 * We raced, another process pulled the new inode into cache
 		 * before us:
@@ -807,7 +823,7 @@ static int bch2_fill_extent(struct bch_fs *c,
 			    struct fiemap_extent_info *info,
 			    struct bkey_s_c k, unsigned flags)
 {
-	if (bkey_extent_is_data(k.k)) {
+	if (bkey_extent_is_direct_data(k.k)) {
 		struct bkey_ptrs_c ptrs = bch2_bkey_ptrs_c(k);
 		const union bch_extent_entry *entry;
 		struct extent_ptr_decoded p;
@@ -838,6 +854,12 @@ static int bch2_fill_extent(struct bch_fs *c,
 		}
 
 		return 0;
+	} else if (bkey_extent_is_inline_data(k.k)) {
+		return fiemap_fill_next_extent(info,
+					       bkey_start_offset(k.k) << 9,
+					       0, k.k->size << 9,
+					       flags|
+					       FIEMAP_EXTENT_DATA_INLINE);
 	} else if (k.k->type == KEY_TYPE_reservation) {
 		return fiemap_fill_next_extent(info,
 					       bkey_start_offset(k.k) << 9,
@@ -891,9 +913,7 @@ retry:
 			bkey_start_offset(k.k);
 		sectors			= k.k->size - offset_into_extent;
 
-		bkey_on_stack_realloc(&cur, c, k.k->u64s);
-		bkey_on_stack_realloc(&prev, c, k.k->u64s);
-		bkey_reassemble(cur.k, k);
+		bkey_on_stack_reassemble(&cur, c, k);
 
 		ret = bch2_read_indirect_extent(&trans,
 					&offset_into_extent, &cur);
@@ -901,14 +921,14 @@ retry:
 			break;
 
 		k = bkey_i_to_s_c(cur.k);
+		bkey_on_stack_realloc(&prev, c, k.k->u64s);
 
 		sectors = min(sectors, k.k->size - offset_into_extent);
 
-		if (offset_into_extent)
-			bch2_cut_front(POS(k.k->p.inode,
-					   bkey_start_offset(k.k) +
-					   offset_into_extent),
-				       cur.k);
+		bch2_cut_front(POS(k.k->p.inode,
+				   bkey_start_offset(k.k) +
+				   offset_into_extent),
+			       cur.k);
 		bch2_key_resize(&cur.k->k, sectors);
 		cur.k->k.p = iter->pos;
 		cur.k->k.p.offset += cur.k->k.size;
@@ -923,10 +943,8 @@ retry:
 		bkey_copy(prev.k, cur.k);
 		have_extent = true;
 
-		if (k.k->type == KEY_TYPE_reflink_v)
-			bch2_btree_iter_set_pos(iter, k.k->p);
-		else
-			bch2_btree_iter_next(iter);
+		bch2_btree_iter_set_pos(iter,
+			POS(iter->pos.inode, iter->pos.offset + sectors));
 	}
 
 	if (ret == -EINTR)
@@ -1062,7 +1080,7 @@ static const struct address_space_operations bch_address_space_operations = {
 	.writepage	= bch2_writepage,
 	.readpage	= bch2_readpage,
 	.writepages	= bch2_writepages,
-	.readpages	= bch2_readpages,
+	.readahead	= bch2_readahead,
 	.set_page_dirty	= __set_page_dirty_nobuffers,
 	.write_begin	= bch2_write_begin,
 	.write_end	= bch2_write_end,
@@ -1238,6 +1256,11 @@ static int bch2_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct bch_fs *c = sb->s_fs_info;
 	struct bch_fs_usage_short usage = bch2_fs_usage_read_short(c);
 	unsigned shift = sb->s_blocksize_bits - 9;
+	/*
+	 * this assumes inodes take up 64 bytes, which is a decent average
+	 * number:
+	 */
+	u64 avail_inodes = ((usage.capacity - usage.used) << 3);
 	u64 fsid;
 
 	buf->f_type	= BCACHEFS_STATFS_MAGIC;
@@ -1245,8 +1268,9 @@ static int bch2_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_blocks	= usage.capacity >> shift;
 	buf->f_bfree	= (usage.capacity - usage.used) >> shift;
 	buf->f_bavail	= buf->f_bfree;
-	buf->f_files	= 0;
-	buf->f_ffree	= 0;
+
+	buf->f_files	= usage.nr_inodes + avail_inodes;
+	buf->f_ffree	= avail_inodes;
 
 	fsid = le64_to_cpup((void *) c->sb.user_uuid.b) ^
 	       le64_to_cpup((void *) c->sb.user_uuid.b + sizeof(u64));

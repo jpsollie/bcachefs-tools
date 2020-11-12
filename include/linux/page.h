@@ -21,6 +21,8 @@ struct page;
 #define kmap_atomic(page)		page_address(page)
 #define kunmap_atomic(addr)		do {} while (0)
 
+#define PageHighMem(page)		false
+
 static const char zero_page[PAGE_SIZE];
 
 #define ZERO_PAGE(o)			((struct page *) &zero_page[0])

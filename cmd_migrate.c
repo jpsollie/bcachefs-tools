@@ -122,7 +122,7 @@ static void update_inode(struct bch_fs *c,
 	struct bkey_inode_buf packed;
 	int ret;
 
-	bch2_inode_pack(&packed, inode);
+	bch2_inode_pack(c, &packed, inode);
 	ret = bch2_btree_insert(c, BTREE_ID_INODES, &packed.inode.k_i,
 				NULL, NULL, 0);
 	if (ret)

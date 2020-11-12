@@ -451,6 +451,7 @@ int bch2_fs_read_write_early(struct bch_fs *c)
 static void __bch2_fs_free(struct bch_fs *c)
 {
 	unsigned i;
+	int cpu;
 
 	for (i = 0; i < BCH_TIME_STAT_NR; i++)
 		bch2_time_stats_exit(&c->times[i]);
@@ -475,6 +476,12 @@ static void __bch2_fs_free(struct bch_fs *c)
 	free_percpu(c->usage[1]);
 	free_percpu(c->usage[0]);
 	kfree(c->usage_base);
+
+	if (c->btree_iters_bufs)
+		for_each_possible_cpu(cpu)
+			kfree(per_cpu_ptr(c->btree_iters_bufs, cpu)->iter);
+
+	free_percpu(c->btree_iters_bufs);
 	free_percpu(c->pcpu);
 	mempool_exit(&c->large_bkey_pool);
 	mempool_exit(&c->btree_bounce_pool);
@@ -485,6 +492,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	kfree(c->replicas_gc.entries);
 	kfree(rcu_dereference_protected(c->disk_groups, 1));
 	kfree(c->journal_seq_blacklist_table);
+	kfree(c->unused_inode_hints);
 	free_heap(&c->copygc_heap);
 
 	if (c->journal_reclaim_wq)
@@ -736,11 +744,13 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 		(btree_blocks(c) + 1) * 2 *
 		sizeof(struct sort_iter_set);
 
+	c->inode_shard_bits = ilog2(roundup_pow_of_two(num_possible_cpus()));
+
 	if (!(c->wq = alloc_workqueue("bcachefs",
 				WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_CPU_INTENSIVE, 1)) ||
-	    !(c->copygc_wq = alloc_workqueue("bcache_copygc",
+	    !(c->copygc_wq = alloc_workqueue("bcachefs_copygc",
 				WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_CPU_INTENSIVE, 1)) ||
-	    !(c->journal_reclaim_wq = alloc_workqueue("bcache_journal",
+	    !(c->journal_reclaim_wq = alloc_workqueue("bcachefs_journal_reclaim",
 				WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_HIGHPRI, 1)) ||
 	    percpu_ref_init(&c->writes, bch2_writes_disabled,
 			    PERCPU_REF_INIT_DEAD, GFP_KERNEL) ||
@@ -750,9 +760,12 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 			    offsetof(struct btree_write_bio, wbio.bio)),
 			BIOSET_NEED_BVECS) ||
 	    !(c->pcpu = alloc_percpu(struct bch_fs_pcpu)) ||
+	    !(c->btree_iters_bufs = alloc_percpu(struct btree_iter_buf)) ||
 	    mempool_init_kvpmalloc_pool(&c->btree_bounce_pool, 1,
 					btree_bytes(c)) ||
 	    mempool_init_kmalloc_pool(&c->large_bkey_pool, 1, 2048) ||
+	    !(c->unused_inode_hints = kcalloc(1U << c->inode_shard_bits,
+					      sizeof(u64), GFP_KERNEL)) ||
 	    bch2_io_clock_init(&c->io_clock[READ]) ||
 	    bch2_io_clock_init(&c->io_clock[WRITE]) ||
 	    bch2_fs_journal_init(&c->journal) ||
@@ -2012,7 +2025,6 @@ static void bcachefs_exit(void)
 static int __init bcachefs_init(void)
 {
 	bch2_bkey_pack_test();
-	bch2_inode_pack_test();
 
 	if (!(bcachefs_kset = kset_create_and_add("bcachefs", NULL, fs_kobj)) ||
 	    bch2_chardev_init() ||

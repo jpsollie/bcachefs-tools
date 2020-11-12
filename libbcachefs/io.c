@@ -171,7 +171,7 @@ void bch2_bio_alloc_pages_pool(struct bch_fs *c, struct bio *bio,
 
 	while (size) {
 		struct page *page = __bio_alloc_page_pool(c, &using_mempool);
-		unsigned len = min(PAGE_SIZE, size);
+		unsigned len = min_t(size_t, PAGE_SIZE, size);
 
 		BUG_ON(!bio_add_page(bio, page, len, 0));
 		size -= len;
@@ -301,7 +301,7 @@ int bch2_extent_update(struct btree_trans *trans,
 		inode_u.bi_sectors += delta;
 
 		if (delta || new_i_size) {
-			bch2_inode_pack(&inode_p, &inode_u);
+			bch2_inode_pack(trans->c, &inode_p, &inode_u);
 			bch2_trans_update(trans, inode_iter,
 					  &inode_p.inode.k_i, 0);
 		}
