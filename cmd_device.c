@@ -12,7 +12,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "libbcachefs/bcachefs.h"
 #include "libbcachefs/bcachefs_ioctl.h"
+#include "libbcachefs/journal.h"
 #include "libbcachefs/super-io.h"
 #include "cmds.h"
 #include "libbcachefs.h"
@@ -488,6 +490,106 @@ int cmd_device_resize(int argc, char *argv[])
 
 		printf("resizing %s to %llu buckets\n", dev, nbuckets);
 		int ret = bch2_dev_resize(c, resize, nbuckets);
+		if (ret)
+			fprintf(stderr, "resize error: %s\n", strerror(-ret));
+
+		percpu_ref_put(&resize->io_ref);
+		bch2_fs_stop(c);
+	}
+	return 0;
+}
+
+static void device_resize_journal_usage(void)
+{
+	puts("bcachefs device resize-journal \n"
+	     "Usage: bcachefs device resize-journal device [ size ]\n"
+	     "\n"
+	     "Options:\n"
+	     "  -h, --help                  display this help and exit\n"
+	     "Report bugs to <linux-bcache@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
+}
+
+int cmd_device_resize_journal(int argc, char *argv[])
+{
+	static const struct option longopts[] = {
+		{ "help",			0, NULL, 'h' },
+		{ NULL }
+	};
+	u64 size;
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
+		switch (opt) {
+		case 'h':
+			device_resize_journal_usage();
+		}
+	args_shift(optind);
+
+	char *dev = arg_pop();
+	if (!dev)
+		die("Please supply a device");
+
+	int dev_fd = xopen(dev, O_RDONLY);
+
+	char *size_arg = arg_pop();
+	if (!size_arg)
+		size = get_size(dev, dev_fd);
+	else if (bch2_strtoull_h(size_arg, &size))
+		die("invalid size");
+
+	size >>= 9;
+
+	if (argc)
+		die("Too many arguments");
+
+	struct stat dev_stat = xfstat(dev_fd);
+
+	struct mntent *mount = dev_to_mount(dev);
+	if (mount) {
+		if (!S_ISBLK(dev_stat.st_mode))
+			die("%s is mounted but isn't a block device?!", dev);
+
+		struct bchfs_handle fs = bcache_fs_open(mount->mnt_dir);
+
+		unsigned idx = bchu_disk_get_idx(fs, dev_stat.st_rdev);
+
+		struct bch_sb *sb = bchu_read_super(fs, -1);
+		if (idx >= sb->nr_devices)
+			die("error reading superblock: dev idx >= sb->nr_devices");
+
+		struct bch_sb_field_members *mi = bch2_sb_get_members(sb);
+		if (!mi)
+			die("error reading superblock: no member info");
+
+		/* could also just read this out of sysfs... meh */
+		struct bch_member *m = mi->members + idx;
+
+		u64 nbuckets = size / le16_to_cpu(m->bucket_size);
+
+		printf("resizing journal on %s to %llu buckets\n", dev, nbuckets);
+		bchu_disk_resize_journal(fs, idx, nbuckets);
+	} else {
+		printf("%s is offline - starting:\n", dev);
+
+		struct bch_fs *c = bch2_fs_open(&dev, 1, bch2_opts_empty());
+		if (IS_ERR(c))
+			die("error opening %s: %s", dev, strerror(-PTR_ERR(c)));
+
+		struct bch_dev *ca, *resize = NULL;
+		unsigned i;
+
+		for_each_online_member(ca, c, i) {
+			if (resize)
+				die("confused: more than one online device?");
+			resize = ca;
+			percpu_ref_get(&resize->io_ref);
+		}
+
+		u64 nbuckets = size / le16_to_cpu(resize->mi.bucket_size);
+
+		printf("resizing journal on %s to %llu buckets\n", dev, nbuckets);
+		int ret = bch2_set_nr_journal_buckets(c, resize, nbuckets);
 		if (ret)
 			fprintf(stderr, "resize error: %s\n", strerror(-ret));
 

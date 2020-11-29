@@ -128,6 +128,8 @@ static int device_cmds(int argc, char *argv[])
 		return cmd_device_set_state(argc, argv);
 	if (!strcmp(cmd, "resize"))
 		return cmd_device_resize(argc, argv);
+	if (!strcmp(cmd, "resize-journal"))
+		return cmd_device_resize_journal(argc, argv);
 
 	usage();
 	return 0;

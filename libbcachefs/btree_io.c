@@ -1442,8 +1442,10 @@ static int validate_bset_for_write(struct bch_fs *c, struct btree *b,
 
 	ret = validate_bset(c, b, i, sectors, WRITE, false) ?:
 		validate_bset_keys(c, b, i, &whiteout_u64s, WRITE, false);
-	if (ret)
+	if (ret) {
 		bch2_inconsistent_error(c);
+		dump_stack();
+	}
 
 	return ret;
 }
@@ -1498,6 +1500,8 @@ void __bch2_btree_node_write(struct bch_fs *c, struct btree *b,
 		new ^=  (1 << BTREE_NODE_write_idx);
 	} while (cmpxchg_acquire(&b->flags, old, new) != old);
 
+	atomic_dec(&c->btree_cache.dirty);
+
 	BUG_ON(btree_node_fake(b));
 	BUG_ON((b->will_make_reachable != 0) != !b->written);
 
@@ -1529,6 +1533,9 @@ void __bch2_btree_node_write(struct bch_fs *c, struct btree *b,
 			      btree_bkey_last(b, t));
 		seq = max(seq, le64_to_cpu(i->journal_seq));
 	}
+
+	/* bch2_varint_decode may read up to 7 bytes past the end of the buffer: */
+	bytes += 8;
 
 	data = btree_bounce_alloc(c, bytes, &used_mempool);
 

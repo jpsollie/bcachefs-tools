@@ -158,6 +158,7 @@ struct btree_cache {
 	/* Number of elements in live + freeable lists */
 	unsigned		used;
 	unsigned		reserve;
+	atomic_t		dirty;
 	struct shrinker		shrink;
 
 	/*
@@ -294,6 +295,11 @@ struct btree_key_cache {
 	struct rhashtable	table;
 	struct list_head	freed;
 	struct list_head	clean;
+	struct list_head	dirty;
+	struct shrinker		shrink;
+
+	size_t			nr_keys;
+	size_t			nr_dirty;
 };
 
 struct bkey_cached_key {
@@ -309,6 +315,7 @@ struct bkey_cached {
 	unsigned long		flags;
 	u8			u64s;
 	bool			valid;
+	u32			btree_trans_barrier_seq;
 	struct bkey_cached_key	key;
 
 	struct rhash_head	hash;
@@ -345,6 +352,7 @@ struct btree_trans {
 	pid_t			pid;
 #endif
 	unsigned long		ip;
+	int			srcu_idx;
 
 	u64			iters_linked;
 	u64			iters_live;
@@ -411,7 +419,6 @@ enum btree_flags {
 
 BTREE_FLAG(read_in_flight);
 BTREE_FLAG(read_error);
-BTREE_FLAG(dirty);
 BTREE_FLAG(need_write);
 BTREE_FLAG(noevict);
 BTREE_FLAG(write_idx);

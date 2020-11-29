@@ -2342,12 +2342,15 @@ static void bch2_trans_alloc_iters(struct btree_trans *trans, struct bch_fs *c)
 	unsigned new_size = BTREE_ITER_MAX;
 	size_t iters_bytes	= sizeof(struct btree_iter) * new_size;
 	size_t updates_bytes	= sizeof(struct btree_insert_entry) * new_size;
-	void *p;
+	void *p = NULL;
 
 	BUG_ON(trans->used_mempool);
 
-	p =     this_cpu_xchg(c->btree_iters_bufs->iter, NULL) ?:
-		mempool_alloc(&trans->c->btree_iters_pool, GFP_NOFS);
+#ifdef __KERNEL__
+	p = this_cpu_xchg(c->btree_iters_bufs->iter, NULL);
+#endif
+	if (!p)
+		p = mempool_alloc(&trans->c->btree_iters_pool, GFP_NOFS);
 
 	trans->iters		= p; p += iters_bytes;
 	trans->updates		= p; p += updates_bytes;
@@ -2369,8 +2372,12 @@ void bch2_trans_init(struct btree_trans *trans, struct bch_fs *c,
 	 */
 	bch2_trans_alloc_iters(trans, c);
 
-	if (expected_mem_bytes)
-		bch2_trans_preload_mem(trans, expected_mem_bytes);
+	if (expected_mem_bytes) {
+		trans->mem_bytes = roundup_pow_of_two(expected_mem_bytes);
+		trans->mem = kmalloc(trans->mem_bytes, GFP_KERNEL|__GFP_NOFAIL);
+	}
+
+	trans->srcu_idx = srcu_read_lock(&c->btree_trans_barrier);
 
 #ifdef CONFIG_BCACHEFS_DEBUG
 	trans->pid = current->pid;
@@ -2392,12 +2399,19 @@ int bch2_trans_exit(struct btree_trans *trans)
 	mutex_unlock(&trans->c->btree_trans_lock);
 #endif
 
+	srcu_read_unlock(&c->btree_trans_barrier, trans->srcu_idx);
+
 	bch2_journal_preres_put(&trans->c->journal, &trans->journal_preres);
 
 	kfree(trans->fs_usage_deltas);
 	kfree(trans->mem);
 
+#ifdef __KERNEL__
+	/*
+	 * Userspace doesn't have a real percpu implementation:
+	 */
 	trans->iters = this_cpu_xchg(c->btree_iters_bufs->iter, trans->iters);
+#endif
 	if (trans->iters)
 		mempool_free(trans->iters, &trans->c->btree_iters_pool);
 
@@ -2474,6 +2488,7 @@ void bch2_btree_trans_to_text(struct printbuf *out, struct bch_fs *c)
 void bch2_fs_btree_iter_exit(struct bch_fs *c)
 {
 	mempool_exit(&c->btree_iters_pool);
+	cleanup_srcu_struct(&c->btree_trans_barrier);
 }
 
 int bch2_fs_btree_iter_init(struct bch_fs *c)
@@ -2483,7 +2498,8 @@ int bch2_fs_btree_iter_init(struct bch_fs *c)
 	INIT_LIST_HEAD(&c->btree_trans_list);
 	mutex_init(&c->btree_trans_lock);
 
-	return mempool_init_kmalloc_pool(&c->btree_iters_pool, 1,
+	return  init_srcu_struct(&c->btree_trans_barrier) ?:
+		mempool_init_kmalloc_pool(&c->btree_iters_pool, 1,
 			sizeof(struct btree_iter) * nr +
 			sizeof(struct btree_insert_entry) * nr +
 			sizeof(struct btree_insert_entry) * nr);

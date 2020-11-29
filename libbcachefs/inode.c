@@ -537,7 +537,9 @@ found_slot:
 	inode_u->bi_inum	= k.k->p.offset;
 	inode_u->bi_generation	= bkey_generation(k);
 
-	return bch2_inode_write(trans, iter, inode_u);
+	ret = bch2_inode_write(trans, iter, inode_u);
+	bch2_trans_iter_put(trans, iter);
+	return ret;
 }
 
 int bch2_inode_rm(struct bch_fs *c, u64 inode_nr)
@@ -574,16 +576,9 @@ retry:
 
 	bi_generation = 0;
 
-	ret = bch2_btree_key_cache_flush(&trans, BTREE_ID_INODES, POS(0, inode_nr));
-	if (ret) {
-		if (ret != -EINTR)
-			bch_err(c, "error flushing btree key cache: %i", ret);
-		goto err;
-	}
-
 	iter = bch2_trans_get_iter(&trans, BTREE_ID_INODES, POS(0, inode_nr),
-				   BTREE_ITER_SLOTS|BTREE_ITER_INTENT);
-	k = bch2_btree_iter_peek_slot(iter);
+				   BTREE_ITER_CACHED|BTREE_ITER_INTENT);
+	k = bch2_btree_iter_peek_cached(iter);
 
 	ret = bkey_err(k);
 	if (ret)

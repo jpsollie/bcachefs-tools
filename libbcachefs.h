@@ -214,6 +214,19 @@ static inline void bchu_disk_resize(struct bchfs_handle fs,
 	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_RESIZE, &i);
 }
 
+static inline void bchu_disk_resize_journal(struct bchfs_handle fs,
+					    unsigned idx,
+					    u64 nbuckets)
+{
+	struct bch_ioctl_disk_resize i = {
+		.flags	= BCH_BY_INDEX,
+		.dev	= idx,
+		.nbuckets = nbuckets,
+	};
+
+	xioctl(fs.ioctl_fd, BCH_IOCTL_DISK_RESIZE_JOURNAL, &i);
+}
+
 int bchu_data(struct bchfs_handle, struct bch_ioctl_data);
 
 struct dev_name {

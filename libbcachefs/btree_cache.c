@@ -328,9 +328,9 @@ restart:
 			clear_btree_node_accessed(b);
 	}
 
-	memalloc_nofs_restore(flags);
 	mutex_unlock(&bc->lock);
 out:
+	memalloc_nofs_restore(flags);
 	return (unsigned long) freed * btree_pages(c);
 }
 
@@ -381,10 +381,12 @@ void bch2_fs_btree_cache_exit(struct bch_fs *c)
 
 		if (btree_node_dirty(b))
 			bch2_btree_complete_write(c, b, btree_current_write(b));
-		clear_btree_node_dirty(b);
+		clear_btree_node_dirty(c, b);
 
 		btree_node_data_free(c, b);
 	}
+
+	BUG_ON(atomic_read(&c->btree_cache.dirty));
 
 	while (!list_empty(&bc->freed)) {
 		b = list_first_entry(&bc->freed, struct btree, list);
@@ -445,7 +447,7 @@ int bch2_fs_btree_cache_init(struct bch_fs *c)
 	bc->shrink.scan_objects		= bch2_btree_cache_scan;
 	bc->shrink.seeks		= 4;
 	bc->shrink.batch		= btree_pages(c) * 2;
-	register_shrinker(&bc->shrink);
+	ret = register_shrinker(&bc->shrink);
 out:
 	pr_verbose_init(c->opts, "ret %i", ret);
 	return ret;

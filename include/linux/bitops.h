@@ -85,6 +85,17 @@ static inline bool test_and_set_bit(long nr, volatile unsigned long *addr)
 	return (old & mask) != 0;
 }
 
+static inline bool test_and_clear_bit(long nr, volatile unsigned long *addr)
+{
+	unsigned long mask = BIT_MASK(nr);
+	unsigned long *p = ((unsigned long *) addr) + BIT_WORD(nr);
+	unsigned long old;
+
+	old = __atomic_fetch_and(p, ~mask, __ATOMIC_RELAXED);
+
+	return (old & mask) != 0;
+}
+
 static inline void clear_bit_unlock(long nr, volatile unsigned long *addr)
 {
 	unsigned long mask = BIT_MASK(nr);

@@ -634,6 +634,13 @@ static void bch2_sb_print_disk_groups(struct bch_sb *sb, struct bch_sb_field *f,
 static void bch2_sb_print_clean(struct bch_sb *sb, struct bch_sb_field *f,
 				enum units units)
 {
+	struct bch_sb_field_clean *clean = field_to_type(f, clean);
+
+
+	printf("  flags:       %x", le32_to_cpu(clean->flags));
+	printf("  read clock:  %x", le16_to_cpu(clean->read_clock));
+	printf("  write clock: %x", le16_to_cpu(clean->write_clock));
+	printf("  journal seq: %llx", le64_to_cpu(clean->journal_seq));
 }
 
 static void bch2_sb_print_journal_seq_blacklist(struct bch_sb *sb, struct bch_sb_field *f,
@@ -684,7 +691,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 {
 	struct bch_sb_field_members *mi;
 	char user_uuid_str[40], internal_uuid_str[40];
-	char features_str[200];
+	char features_str[500];
 	char fields_have_str[200];
 	char label[BCH_SB_LABEL_SIZE + 1];
 	char time_str[64];

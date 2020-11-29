@@ -18,7 +18,19 @@
 
 #include <trace/events/bcachefs.h>
 
-static inline struct journal_buf *journal_seq_to_buf(struct journal *, u64);
+static u64 last_unwritten_seq(struct journal *j)
+{
+	union journal_res_state s = READ_ONCE(j->reservations);
+
+	lockdep_assert_held(&j->lock);
+
+	return journal_cur_seq(j) - s.prev_buf_unwritten;
+}
+
+static inline bool journal_seq_unwritten(struct journal *j, u64 seq)
+{
+	return seq >= last_unwritten_seq(j);
+}
 
 static bool __journal_entry_is_open(union journal_res_state state)
 {
@@ -28,6 +40,22 @@ static bool __journal_entry_is_open(union journal_res_state state)
 static bool journal_entry_is_open(struct journal *j)
 {
 	return __journal_entry_is_open(j->reservations);
+}
+
+static inline struct journal_buf *
+journal_seq_to_buf(struct journal *j, u64 seq)
+{
+	struct journal_buf *buf = NULL;
+
+	EBUG_ON(seq > journal_cur_seq(j));
+	EBUG_ON(seq == journal_cur_seq(j) &&
+		j->reservations.cur_entry_offset == JOURNAL_ENTRY_CLOSED_VAL);
+
+	if (journal_seq_unwritten(j, seq)) {
+		buf = j->buf + (seq & 1);
+		EBUG_ON(le64_to_cpu(buf->data->seq) != seq);
+	}
+	return buf;
 }
 
 static void journal_pin_new_entry(struct journal *j, int count)
@@ -51,6 +79,8 @@ static void bch2_journal_buf_init(struct journal *j)
 {
 	struct journal_buf *buf = journal_cur_buf(j);
 
+	bkey_extent_init(&buf->key);
+
 	memset(buf->has_inode, 0, sizeof(buf->has_inode));
 
 	memset(buf->data, 0, sizeof(*buf->data));
@@ -72,6 +102,7 @@ void bch2_journal_halt(struct journal *j)
 	} while ((v = atomic64_cmpxchg(&j->reservations.counter,
 				       old.v, new.v)) != old.v);
 
+	j->err_seq = journal_cur_seq(j);
 	journal_wake(j);
 	closure_wake_up(&journal_cur_buf(j)->wait);
 }
@@ -139,8 +170,6 @@ static bool __journal_entry_close(struct journal *j)
 	BUG_ON(sectors > buf->sectors);
 	buf->sectors = sectors;
 
-	bkey_extent_init(&buf->key);
-
 	/*
 	 * We have to set last_seq here, _before_ opening a new journal entry:
 	 *
@@ -161,11 +190,6 @@ static bool __journal_entry_close(struct journal *j)
 	 * before we open a new one:
 	 */
 	buf->data->last_seq	= cpu_to_le64(journal_last_seq(j));
-
-	if (journal_entry_empty(buf->data))
-		clear_bit(JOURNAL_NOT_EMPTY, &j->flags);
-	else
-		set_bit(JOURNAL_NOT_EMPTY, &j->flags);
 
 	journal_pin_new_entry(j, 1);
 
@@ -391,8 +415,17 @@ unlock:
 		goto retry;
 
 	if (ret == -ENOSPC) {
-		WARN_ONCE(!can_discard && (flags & JOURNAL_RES_GET_RESERVED),
-			  "JOURNAL_RES_GET_RESERVED set but journal full");
+		if (WARN_ONCE(!can_discard && (flags & JOURNAL_RES_GET_RESERVED),
+			      "JOURNAL_RES_GET_RESERVED set but journal full")) {
+			char *buf;
+
+			buf = kmalloc(4096, GFP_NOFS);
+			if (buf) {
+				bch2_journal_debug_to_text(&PBUF(buf), j);
+				pr_err("\n%s", buf);
+				kfree(buf);
+			}
+		}
 
 		/*
 		 * Journal is full - can't rely on reclaim from work item due to
@@ -503,146 +536,28 @@ out:
 
 /* journal flushing: */
 
-u64 bch2_journal_last_unwritten_seq(struct journal *j)
-{
-	u64 seq;
-
-	spin_lock(&j->lock);
-	seq = journal_cur_seq(j);
-	if (j->reservations.prev_buf_unwritten)
-		seq--;
-	spin_unlock(&j->lock);
-
-	return seq;
-}
-
-/**
- * bch2_journal_open_seq_async - try to open a new journal entry if @seq isn't
- * open yet, or wait if we cannot
- *
- * used by the btree interior update machinery, when it needs to write a new
- * btree root - every journal entry contains the roots of all the btrees, so it
- * doesn't need to bother with getting a journal reservation
- */
-int bch2_journal_open_seq_async(struct journal *j, u64 seq, struct closure *cl)
-{
-	struct bch_fs *c = container_of(j, struct bch_fs, journal);
-	int ret;
-
-	spin_lock(&j->lock);
-
-	/*
-	 * Can't try to open more than one sequence number ahead:
-	 */
-	BUG_ON(journal_cur_seq(j) < seq && !journal_entry_is_open(j));
-
-	if (journal_cur_seq(j) > seq ||
-	    journal_entry_is_open(j)) {
-		spin_unlock(&j->lock);
-		return 0;
-	}
-
-	if (journal_cur_seq(j) < seq &&
-	    !__journal_entry_close(j)) {
-		/* haven't finished writing out the previous one: */
-		trace_journal_entry_full(c);
-		ret = -EAGAIN;
-	} else {
-		BUG_ON(journal_cur_seq(j) != seq);
-
-		ret = journal_entry_open(j);
-	}
-
-	if ((ret == -EAGAIN || ret == -ENOSPC) &&
-	    !j->res_get_blocked_start)
-		j->res_get_blocked_start = local_clock() ?: 1;
-
-	if (ret == -EAGAIN || ret == -ENOSPC)
-		closure_wait(&j->async_wait, cl);
-
-	spin_unlock(&j->lock);
-
-	if (ret == -ENOSPC) {
-		trace_journal_full(c);
-		bch2_journal_reclaim_work(&j->reclaim_work.work);
-		ret = -EAGAIN;
-	}
-
-	return ret;
-}
-
-static int journal_seq_error(struct journal *j, u64 seq)
-{
-	union journal_res_state state = READ_ONCE(j->reservations);
-
-	if (seq == journal_cur_seq(j))
-		return bch2_journal_error(j);
-
-	if (seq + 1 == journal_cur_seq(j) &&
-	    !state.prev_buf_unwritten &&
-	    seq > j->seq_ondisk)
-		return -EIO;
-
-	return 0;
-}
-
-static inline struct journal_buf *
-journal_seq_to_buf(struct journal *j, u64 seq)
-{
-	/* seq should be for a journal entry that has been opened: */
-	BUG_ON(seq > journal_cur_seq(j));
-	BUG_ON(seq == journal_cur_seq(j) &&
-	       j->reservations.cur_entry_offset == JOURNAL_ENTRY_CLOSED_VAL);
-
-	if (seq == journal_cur_seq(j))
-		return journal_cur_buf(j);
-	if (seq + 1 == journal_cur_seq(j) &&
-	    j->reservations.prev_buf_unwritten)
-		return journal_prev_buf(j);
-	return NULL;
-}
-
-/**
- * bch2_journal_wait_on_seq - wait for a journal entry to be written
- *
- * does _not_ cause @seq to be written immediately - if there is no other
- * activity to cause the relevant journal entry to be filled up or flushed it
- * can wait for an arbitrary amount of time (up to @j->write_delay_ms, which is
- * configurable).
- */
-void bch2_journal_wait_on_seq(struct journal *j, u64 seq,
-			      struct closure *parent)
-{
-	struct journal_buf *buf;
-
-	spin_lock(&j->lock);
-
-	if ((buf = journal_seq_to_buf(j, seq))) {
-		if (!closure_wait(&buf->wait, parent))
-			BUG();
-
-		if (seq == journal_cur_seq(j)) {
-			smp_mb();
-			if (bch2_journal_error(j))
-				closure_wake_up(&buf->wait);
-		}
-	}
-
-	spin_unlock(&j->lock);
-}
-
 /**
  * bch2_journal_flush_seq_async - wait for a journal entry to be written
  *
  * like bch2_journal_wait_on_seq, except that it triggers a write immediately if
  * necessary
  */
-void bch2_journal_flush_seq_async(struct journal *j, u64 seq,
+int bch2_journal_flush_seq_async(struct journal *j, u64 seq,
 				  struct closure *parent)
 {
 	struct journal_buf *buf;
+	int ret = 0;
 
 	spin_lock(&j->lock);
+	if (seq <= j->err_seq) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (seq <= j->seq_ondisk) {
+		ret = 1;
+		goto out;
+	}
 
 	if (parent &&
 	    (buf = journal_seq_to_buf(j, seq)))
@@ -651,20 +566,8 @@ void bch2_journal_flush_seq_async(struct journal *j, u64 seq,
 
 	if (seq == journal_cur_seq(j))
 		__journal_entry_close(j);
+out:
 	spin_unlock(&j->lock);
-}
-
-static int journal_seq_flushed(struct journal *j, u64 seq)
-{
-	int ret;
-
-	spin_lock(&j->lock);
-	ret = seq <= j->seq_ondisk ? 1 : journal_seq_error(j, seq);
-
-	if (seq == journal_cur_seq(j))
-		__journal_entry_close(j);
-	spin_unlock(&j->lock);
-
 	return ret;
 }
 
@@ -673,26 +576,11 @@ int bch2_journal_flush_seq(struct journal *j, u64 seq)
 	u64 start_time = local_clock();
 	int ret, ret2;
 
-	ret = wait_event_killable(j->wait, (ret2 = journal_seq_flushed(j, seq)));
+	ret = wait_event_killable(j->wait, (ret2 = bch2_journal_flush_seq_async(j, seq, NULL)));
 
 	bch2_time_stats_update(j->flush_seq_time, start_time);
 
 	return ret ?: ret2 < 0 ? ret2 : 0;
-}
-
-/**
- * bch2_journal_meta_async - force a journal entry to be written
- */
-void bch2_journal_meta_async(struct journal *j, struct closure *parent)
-{
-	struct journal_res res;
-
-	memset(&res, 0, sizeof(res));
-
-	bch2_journal_res_get(j, &res, jset_u64s(0), 0);
-	bch2_journal_res_put(j, &res);
-
-	bch2_journal_flush_seq_async(j, res.seq, parent);
 }
 
 int bch2_journal_meta(struct journal *j)
@@ -797,7 +685,7 @@ static int __bch2_set_nr_journal_buckets(struct bch_dev *ca, unsigned nr,
 		goto err;
 
 	journal_buckets = bch2_sb_resize_journal(&ca->disk_sb,
-						 nr + sizeof(*journal_buckets) / sizeof(u64));
+					nr + sizeof(*journal_buckets) / sizeof(u64));
 	if (!journal_buckets)
 		goto err;
 
@@ -843,6 +731,12 @@ static int __bch2_set_nr_journal_buckets(struct bch_dev *ca, unsigned nr,
 			spin_lock(&c->journal.lock);
 		}
 
+		/*
+		 * XXX
+		 * For resize at runtime, we should be writing the new
+		 * superblock before inserting into the journal array
+		 */
+
 		pos = ja->nr ? (ja->cur_idx + 1) % ja->nr : 0;
 		__array_insert_item(ja->buckets,		ja->nr, pos);
 		__array_insert_item(ja->bucket_seq,		ja->nr, pos);
@@ -878,6 +772,8 @@ static int __bch2_set_nr_journal_buckets(struct bch_dev *ca, unsigned nr,
 
 	ret = 0;
 err:
+	bch2_sb_resize_journal(&ca->disk_sb,
+		ja->nr + sizeof(*journal_buckets) / sizeof(u64));
 	kfree(new_bucket_seq);
 	kfree(new_buckets);
 
@@ -989,7 +885,8 @@ void bch2_fs_journal_stop(struct journal *j)
 	journal_quiesce(j);
 
 	BUG_ON(!bch2_journal_error(j) &&
-	       test_bit(JOURNAL_NOT_EMPTY, &j->flags));
+	       (journal_entry_is_open(j) ||
+		j->last_empty_seq + 1 != journal_cur_seq(j)));
 
 	cancel_delayed_work_sync(&j->write_work);
 	cancel_delayed_work_sync(&j->reclaim_work);
@@ -1047,6 +944,9 @@ int bch2_fs_journal_start(struct journal *j, u64 cur_seq,
 	set_bit(JOURNAL_STARTED, &j->flags);
 
 	journal_pin_new_entry(j, 1);
+
+	j->reservations.idx = journal_cur_seq(j);
+
 	bch2_journal_buf_init(j);
 
 	c->last_bucket_seq_cleanup = journal_cur_seq(j);

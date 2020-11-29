@@ -219,4 +219,6 @@ struct qstr {
 
 #define POISON_FREE 0x6b
 
+static inline void dump_stack(void) {}
+
 #endif

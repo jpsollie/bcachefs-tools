@@ -91,6 +91,11 @@ void bch2_pagecache_add_put(struct pagecache_lock *lock)
 	__pagecache_lock_put(lock, 1);
 }
 
+bool bch2_pagecache_add_tryget(struct pagecache_lock *lock)
+{
+	return __pagecache_lock_tryget(lock, 1);
+}
+
 void bch2_pagecache_add_get(struct pagecache_lock *lock)
 {
 	__pagecache_lock_get(lock, 1);
@@ -271,7 +276,8 @@ __bch2_create(struct bch_inode_info *dir, struct dentry *dentry,
 	if (!tmpfile)
 		mutex_lock(&dir->ei_update_lock);
 
-	bch2_trans_init(&trans, c, 8, 1024);
+	bch2_trans_init(&trans, c, 8,
+			2048 + (!tmpfile ? dentry->d_name.len : 0));
 retry:
 	bch2_trans_begin(&trans);
 

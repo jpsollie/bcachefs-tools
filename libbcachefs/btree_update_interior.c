@@ -11,6 +11,7 @@
 #include "btree_iter.h"
 #include "btree_locking.h"
 #include "buckets.h"
+#include "error.h"
 #include "extents.h"
 #include "journal.h"
 #include "journal_reclaim.h"
@@ -149,7 +150,7 @@ void bch2_btree_node_free_never_inserted(struct bch_fs *c, struct btree *b)
 
 	b->ob.nr = 0;
 
-	clear_btree_node_dirty(b);
+	clear_btree_node_dirty(c, b);
 
 	btree_node_lock_type(c, b, SIX_LOCK_write);
 	__btree_node_free(c, b);
@@ -264,7 +265,7 @@ static struct btree *bch2_btree_node_alloc(struct btree_update *as, unsigned lev
 	b = as->prealloc_nodes[--as->nr_prealloc_nodes];
 
 	set_btree_node_accessed(b);
-	set_btree_node_dirty(b);
+	set_btree_node_dirty(c, b);
 	set_btree_node_need_write(b);
 
 	bch2_bset_init_first(b, &b->data->keys);
@@ -523,6 +524,7 @@ static void btree_update_nodes_written(struct btree_update *as)
 {
 	struct bch_fs *c = as->c;
 	struct btree *b = as->b;
+	struct btree_trans trans;
 	u64 journal_seq = 0;
 	unsigned i;
 	int ret;
@@ -540,14 +542,16 @@ static void btree_update_nodes_written(struct btree_update *as)
 	 * journal reclaim does btree updates when flushing bkey_cached entries,
 	 * which may require allocations as well.
 	 */
-	ret = bch2_trans_do(c, &as->disk_res, &journal_seq,
-			    BTREE_INSERT_NOFAIL|
-			    BTREE_INSERT_USE_RESERVE|
-			    BTREE_INSERT_USE_ALLOC_RESERVE|
-			    BTREE_INSERT_NOCHECK_RW|
-			    BTREE_INSERT_JOURNAL_RECLAIM|
-			    BTREE_INSERT_JOURNAL_RESERVED,
-			    btree_update_nodes_written_trans(&trans, as));
+	bch2_trans_init(&trans, c, 0, 512);
+	ret = __bch2_trans_do(&trans, &as->disk_res, &journal_seq,
+			      BTREE_INSERT_NOFAIL|
+			      BTREE_INSERT_USE_RESERVE|
+			      BTREE_INSERT_USE_ALLOC_RESERVE|
+			      BTREE_INSERT_NOCHECK_RW|
+			      BTREE_INSERT_JOURNAL_RECLAIM|
+			      BTREE_INSERT_JOURNAL_RESERVED,
+			      btree_update_nodes_written_trans(&trans, as));
+	bch2_trans_exit(&trans);
 	BUG_ON(ret && !bch2_journal_error(&c->journal));
 
 	if (b) {
@@ -827,7 +831,7 @@ void bch2_btree_interior_update_will_free_node(struct btree_update *as,
 		closure_wake_up(&c->btree_interior_update_wait);
 	}
 
-	clear_btree_node_dirty(b);
+	clear_btree_node_dirty(c, b);
 	clear_btree_node_need_write(b);
 
 	/*
@@ -1018,7 +1022,18 @@ static void bch2_insert_fixup_btree_ptr(struct btree_update *as, struct btree *b
 					struct bkey_i *insert,
 					struct btree_node_iter *node_iter)
 {
+	struct bch_fs *c = as->c;
 	struct bkey_packed *k;
+	const char *invalid;
+
+	invalid = bch2_bkey_invalid(c, bkey_i_to_s_c(insert), btree_node_type(b));
+	if (invalid) {
+		char buf[160];
+
+		bch2_bkey_val_to_text(&PBUF(buf), c, bkey_i_to_s_c(insert));
+		bch2_fs_inconsistent(c, "inserting invalid bkey %s: %s", buf, invalid);
+		dump_stack();
+	}
 
 	BUG_ON(as->journal_u64s + jset_u64s(insert->k.u64s) >
 	       ARRAY_SIZE(as->journal_entries));
@@ -1034,7 +1049,7 @@ static void bch2_insert_fixup_btree_ptr(struct btree_update *as, struct btree *b
 		bch2_btree_node_iter_advance(node_iter, b);
 
 	bch2_btree_bset_insert_key(iter, b, node_iter, insert);
-	set_btree_node_dirty(b);
+	set_btree_node_dirty(c, b);
 	set_btree_node_need_write(b);
 }
 

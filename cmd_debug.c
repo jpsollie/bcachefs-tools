@@ -317,8 +317,10 @@ static void print_node_ondisk(struct bch_fs *c, struct btree *b)
 			sectors = vstruct_sectors(bne, c->block_bits);
 		}
 
-		fprintf(stdout, "  offset %u journal seq %llu\n",
-			offset, le64_to_cpu(i->journal_seq));
+		fprintf(stdout, "  offset %u version %u, journal seq %llu\n",
+			offset,
+			le16_to_cpu(i->version),
+			le64_to_cpu(i->journal_seq));
 		offset += sectors;
 
 		for (k = i->start;
@@ -574,7 +576,7 @@ int cmd_list_journal(int argc, char *argv[])
 		       "    write clock %8u\n"
 		       ,
 		       le64_to_cpu(p->j.seq),
-		       le32_to_cpu(p->j.seq),
+		       le32_to_cpu(p->j.version),
 		       le64_to_cpu(p->j.last_seq),
 		       le16_to_cpu(p->j.read_clock),
 		       le16_to_cpu(p->j.write_clock));

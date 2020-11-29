@@ -58,7 +58,7 @@ static inline void *krealloc(void *old, size_t size, gfp_t flags)
 #define kzalloc(size, flags)		kmalloc(size, flags|__GFP_ZERO)
 #define kmalloc_array(n, size, flags)					\
 	((size) != 0 && (n) > SIZE_MAX / (size)				\
-	 ? NULL : kmalloc(n * size, flags))
+	 ? NULL : kmalloc((n) * (size), flags))
 
 #define kcalloc(n, size, flags)		kmalloc_array(n, size, flags|__GFP_ZERO)
 
