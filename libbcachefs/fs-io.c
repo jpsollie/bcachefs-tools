@@ -684,7 +684,7 @@ static int readpages_iter_init(struct readpages_iter *iter,
 	if (!iter->pages)
 		return -ENOMEM;
 
-	__readahead_batch(ractl, iter->pages, nr_pages);
+	nr_pages = __readahead_batch(ractl, iter->pages, nr_pages);
 	for (i = 0; i < nr_pages; i++) {
 		__bch2_page_state_create(iter->pages[i], __GFP_NOFAIL);
 		put_page(iter->pages[i]);
@@ -856,7 +856,9 @@ retry:
 		goto retry;
 
 	if (ret) {
-		bcache_io_error(c, &rbio->bio, "btree IO error %i", ret);
+		bch_err_inum_ratelimited(c, inum,
+				"read error %i from btree lookup", ret);
+		rbio->bio.bi_status = BLK_STS_IOERR;
 		bio_endio(&rbio->bio);
 	}
 
@@ -1013,6 +1015,8 @@ static void bch2_writepage_io_done(struct closure *cl)
 	unsigned i;
 
 	if (io->op.error) {
+		set_bit(EI_INODE_ERROR, &io->inode->ei_flags);
+
 		bio_for_each_segment_all(bvec, bio, iter) {
 			struct bch_page_state *s;
 
@@ -1902,7 +1906,13 @@ loop:
 
 		bio_for_each_segment_all(bv, bio, iter)
 			put_page(bv->bv_page);
-		if (!dio->iter.count || dio->op.error)
+
+		if (dio->op.error) {
+			set_bit(EI_INODE_ERROR, &inode->ei_flags);
+			break;
+		}
+
+		if (!dio->iter.count)
 			break;
 
 		bio_reset(bio);
@@ -2290,7 +2300,8 @@ int bch2_truncate(struct bch_inode_info *inode, struct iattr *iattr)
 	if (ret)
 		goto err;
 
-	BUG_ON(inode->v.i_size < inode_u.bi_size);
+	WARN_ON(!test_bit(EI_INODE_ERROR, &inode->ei_flags) &&
+		inode->v.i_size < inode_u.bi_size);
 
 	if (iattr->ia_size > inode->v.i_size) {
 		ret = bch2_extend(inode, &inode_u, iattr);
@@ -2474,10 +2485,7 @@ static long bchfs_fcollapse_finsert(struct bch_inode_info *inode,
 	src = bch2_trans_get_iter(&trans, BTREE_ID_EXTENTS,
 			POS(inode->v.i_ino, src_start >> 9),
 			BTREE_ITER_INTENT);
-	BUG_ON(IS_ERR_OR_NULL(src));
-
 	dst = bch2_trans_copy_iter(&trans, src);
-	BUG_ON(IS_ERR_OR_NULL(dst));
 
 	while (1) {
 		struct disk_reservation disk_res =

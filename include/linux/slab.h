@@ -132,4 +132,35 @@ static inline void *kmemdup(const void *src, size_t len, gfp_t gfp)
 	return p;
 }
 
+struct kmem_cache {
+	size_t		    obj_size;
+};
+
+static inline void *kmem_cache_alloc(struct kmem_cache *c, gfp_t gfp)
+{
+	return kmalloc(c->obj_size, gfp);
+}
+
+static inline void kmem_cache_free(struct kmem_cache *c, void *p)
+{
+	kfree(p);
+}
+
+static inline void kmem_cache_destroy(struct kmem_cache *p)
+{
+	kfree(p);
+}
+
+static inline struct kmem_cache *kmem_cache_create(size_t obj_size)
+{
+	struct kmem_cache *p = kmalloc(sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return NULL;
+
+	p->obj_size = obj_size;
+	return p;
+}
+
+#define KMEM_CACHE(_struct, _flags)	kmem_cache_create(sizeof(struct _struct))
+
 #endif /* __TOOLS_LINUX_SLAB_H */

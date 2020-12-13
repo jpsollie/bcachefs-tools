@@ -26,7 +26,6 @@
 #define list_for_each_entry(p, h, m)	cds_list_for_each_entry(p, h, m)
 #define list_for_each_entry_reverse(p, h, m) cds_list_for_each_entry_reverse(p, h, m)
 #define list_for_each_entry_safe(p, n, h, m) cds_list_for_each_entry_safe(p, n, h, m)
-#define list_for_each_entry_safe_reverse(p, n, h, m) cds_list_for_each_entry_safe_reverse(p, n, h, m)
 
 static inline int list_empty_careful(const struct list_head *head)
 {
@@ -53,6 +52,15 @@ static inline void list_splice_init(struct list_head *list,
 
 #define list_first_entry_or_null(ptr, type, member) \
 	(!list_empty(ptr) ? list_first_entry(ptr, type, member) : NULL)
+
+#define list_prev_entry(pos, member) \
+	list_entry((pos)->member.prev, typeof(*(pos)), member)
+
+#define list_for_each_entry_safe_reverse(pos, n, head, member)		\
+	for (pos = list_last_entry(head, typeof(*pos), member),		\
+		n = list_prev_entry(pos, member);			\
+	     &pos->member != (head); 					\
+	     pos = n, n = list_prev_entry(n, member))
 
 /* hlists: */
 

@@ -636,7 +636,7 @@ static void write_super_endio(struct bio *bio)
 
 	/* XXX: return errors directly */
 
-	if (bch2_dev_io_err_on(bio->bi_status, ca, "superblock write: %s",
+	if (bch2_dev_io_err_on(bio->bi_status, ca, "superblock write error: %s",
 			       bch2_blk_status_to_str(bio->bi_status)))
 		ca->sb_write_error = 1;
 
@@ -995,10 +995,10 @@ bch2_journal_super_entries_add_common(struct bch_fs *c,
 	percpu_down_write(&c->mark_lock);
 
 	if (!journal_seq) {
-		bch2_fs_usage_acc_to_base(c, 0);
-		bch2_fs_usage_acc_to_base(c, 1);
+		for (i = 0; i < ARRAY_SIZE(c->usage); i++)
+			bch2_fs_usage_acc_to_base(c, i);
 	} else {
-		bch2_fs_usage_acc_to_base(c, journal_seq & 1);
+		bch2_fs_usage_acc_to_base(c, journal_seq & JOURNAL_BUF_MASK);
 	}
 
 	{
