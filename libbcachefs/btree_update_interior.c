@@ -195,21 +195,18 @@ static struct btree *__bch2_btree_node_alloc(struct bch_fs *c,
 {
 	struct write_point *wp;
 	struct btree *b;
-	BKEY_PADDED(k) tmp;
+	__BKEY_PADDED(k, BKEY_BTREE_PTR_VAL_U64s_MAX) tmp;
 	struct open_buckets ob = { .nr = 0 };
 	struct bch_devs_list devs_have = (struct bch_devs_list) { 0 };
 	unsigned nr_reserve;
 	enum alloc_reserve alloc_reserve;
 
-	if (flags & BTREE_INSERT_USE_ALLOC_RESERVE) {
+	if (flags & BTREE_INSERT_USE_RESERVE) {
 		nr_reserve	= 0;
-		alloc_reserve	= RESERVE_ALLOC;
-	} else if (flags & BTREE_INSERT_USE_RESERVE) {
-		nr_reserve	= BTREE_NODE_RESERVE / 2;
-		alloc_reserve	= RESERVE_BTREE;
+		alloc_reserve	= RESERVE_BTREE_MOVINGGC;
 	} else {
 		nr_reserve	= BTREE_NODE_RESERVE;
-		alloc_reserve	= RESERVE_NONE;
+		alloc_reserve	= RESERVE_BTREE;
 	}
 
 	mutex_lock(&c->btree_reserve_cache_lock);
@@ -519,14 +516,18 @@ static int btree_update_nodes_written_trans(struct btree_trans *trans,
 	trans->journal_pin = &as->journal;
 
 	for_each_keylist_key(&as->new_keys, k) {
-		ret = bch2_trans_mark_key(trans, bkey_i_to_s_c(k),
+		ret = bch2_trans_mark_key(trans,
+					  bkey_s_c_null,
+					  bkey_i_to_s_c(k),
 					  0, 0, BTREE_TRIGGER_INSERT);
 		if (ret)
 			return ret;
 	}
 
 	for_each_keylist_key(&as->old_keys, k) {
-		ret = bch2_trans_mark_key(trans, bkey_i_to_s_c(k),
+		ret = bch2_trans_mark_key(trans,
+					  bkey_i_to_s_c(k),
+					  bkey_s_c_null,
 					  0, 0, BTREE_TRIGGER_OVERWRITE);
 		if (ret)
 			return ret;
@@ -573,8 +574,6 @@ static void btree_update_nodes_written(struct btree_update *as)
 	bch2_trans_init(&trans, c, 0, 512);
 	ret = __bch2_trans_do(&trans, &as->disk_res, &journal_seq,
 			      BTREE_INSERT_NOFAIL|
-			      BTREE_INSERT_USE_RESERVE|
-			      BTREE_INSERT_USE_ALLOC_RESERVE|
 			      BTREE_INSERT_NOCHECK_RW|
 			      BTREE_INSERT_JOURNAL_RECLAIM|
 			      BTREE_INSERT_JOURNAL_RESERVED,
@@ -1228,6 +1227,9 @@ static void btree_split_insert_keys(struct btree_update *as, struct btree *b,
 		src = n;
 	}
 
+	/* Also clear out the unwritten whiteouts area: */
+	b->whiteout_u64s = 0;
+
 	i->u64s = cpu_to_le16((u64 *) dst - i->_data);
 	set_btree_bset_end(b, b->set);
 
@@ -1453,15 +1455,6 @@ int bch2_btree_split_leaf(struct bch_fs *c, struct btree_iter *iter,
 	struct btree_update *as;
 	struct closure cl;
 	int ret = 0;
-	struct btree_insert_entry *i;
-
-	/*
-	 * We already have a disk reservation and open buckets pinned; this
-	 * allocation must not block:
-	 */
-	trans_for_each_update(trans, i)
-		if (btree_node_type_needs_gc(i->iter->btree_id))
-			flags |= BTREE_INSERT_USE_RESERVE;
 
 	closure_init_stack(&cl);
 
@@ -1922,10 +1915,7 @@ int bch2_btree_node_update_key(struct bch_fs *c, struct btree_iter *iter,
 retry:
 	as = bch2_btree_update_start(iter->trans, iter->btree_id,
 		parent ? btree_update_reserve_required(c, parent) : 0,
-		BTREE_INSERT_NOFAIL|
-		BTREE_INSERT_USE_RESERVE|
-		BTREE_INSERT_USE_ALLOC_RESERVE,
-		&cl);
+		BTREE_INSERT_NOFAIL, &cl);
 
 	if (IS_ERR(as)) {
 		ret = PTR_ERR(as);

@@ -634,8 +634,6 @@ struct bch_reservation {
 #define BKEY_EXTENT_VAL_U64s_MAX				\
 	(1 + BKEY_EXTENT_PTR_U64s_MAX * (BCH_REPLICAS_MAX + 1))
 
-#define BKEY_PADDED(key)	__BKEY_PADDED(key, BKEY_EXTENT_VAL_U64s_MAX)
-
 /* * Maximum possible size of an entire extent, key + value: */
 #define BKEY_EXTENT_U64s_MAX		(BKEY_U64s + BKEY_EXTENT_VAL_U64s_MAX)
 
@@ -1358,6 +1356,8 @@ enum bch_sb_compat {
 /* options: */
 
 #define BCH_REPLICAS_MAX		4U
+
+#define BCH_BKEY_PTRS_MAX		16U
 
 enum bch_error_actions {
 	BCH_ON_ERROR_CONTINUE		= 0,

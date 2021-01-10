@@ -172,9 +172,14 @@ int cmd_device_remove(int argc, char *argv[])
 		if (!path)
 			die("Please supply filesystem to remove device from");
 
-		dev_idx = (intptr_t) arg_pop();
-		if (!dev_idx)
+		char *dev_str = arg_pop();
+		if (!dev_str)
 			die("Please supply device id");
+
+		errno = 0;
+		dev_idx = strtoul(dev_str, NULL, 10);
+		if (errno)
+			die("Error parsing device id: %m");
 
 		fs = bcache_fs_open(path);
 	} else {

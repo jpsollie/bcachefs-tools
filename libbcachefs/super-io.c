@@ -614,9 +614,6 @@ got_super:
 	    bdev_logical_block_size(sb->bdev))
 		goto err;
 
-	if (sb->mode & FMODE_WRITE)
-		bdev_get_queue(sb->bdev)->backing_dev_info->capabilities
-			|= BDI_CAP_STABLE_WRITES;
 	ret = 0;
 	sb->have_layout = true;
 out:

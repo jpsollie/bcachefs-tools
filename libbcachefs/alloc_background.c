@@ -319,9 +319,7 @@ retry:
 	bch2_trans_update(trans, iter, &a->k_i,
 			  BTREE_TRIGGER_NORUN);
 	ret = bch2_trans_commit(trans, NULL, NULL,
-				BTREE_INSERT_NOFAIL|
-				BTREE_INSERT_USE_RESERVE|
-				flags);
+				BTREE_INSERT_NOFAIL|flags);
 err:
 	if (ret == -EINTR)
 		goto retry;
@@ -368,7 +366,7 @@ int bch2_alloc_write(struct bch_fs *c, unsigned flags)
 	unsigned i;
 	int ret = 0;
 
-	for_each_rw_member(ca, c, i) {
+	for_each_member_device(ca, c, i) {
 		bch2_dev_alloc_write(c, ca, flags);
 		if (ret) {
 			percpu_ref_put(&ca->io_ref);
@@ -505,8 +503,9 @@ int bch2_bucket_io_time_reset(struct btree_trans *trans, unsigned dev,
 				   BTREE_ITER_CACHED|
 				   BTREE_ITER_CACHED_NOFILL|
 				   BTREE_ITER_INTENT);
-	if (IS_ERR(iter))
-		return PTR_ERR(iter);
+	ret = bch2_btree_iter_traverse(iter);
+	if (ret)
+		goto out;
 
 	a = bch2_trans_kmalloc(trans, BKEY_ALLOC_U64s_MAX * 8);
 	ret = PTR_ERR_OR_ZERO(a);
@@ -574,8 +573,7 @@ static int wait_buckets_available(struct bch_fs *c, struct bch_dev *ca)
 
 		if (available > fifo_free(&ca->free_inc) ||
 		    (available &&
-		     (!fifo_full(&ca->free[RESERVE_BTREE]) ||
-		      !fifo_full(&ca->free[RESERVE_MOVINGGC]))))
+		     !fifo_full(&ca->free[RESERVE_MOVINGGC])))
 			break;
 
 		up_read(&c->gc_lock);
@@ -976,8 +974,7 @@ retry:
 				BTREE_INSERT_NOUNLOCK|
 				BTREE_INSERT_NOCHECK_RW|
 				BTREE_INSERT_NOFAIL|
-				BTREE_INSERT_USE_RESERVE|
-				BTREE_INSERT_USE_ALLOC_RESERVE|
+				BTREE_INSERT_JOURNAL_RESERVED|
 				flags);
 	if (ret == -EINTR)
 		goto retry;

@@ -508,6 +508,10 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 
 	/*
 	 * Can't be holding any read locks when we go to take write locks:
+	 * another thread could be holding an intent lock on the same node we
+	 * have a read lock on, and it'll block trying to take a write lock
+	 * (because we hold a read lock) and it could be blocking us by holding
+	 * its own read lock (while we're trying to to take write locks).
 	 *
 	 * note - this must be done after bch2_trans_journal_preres_get_cold()
 	 * or anything else that might call bch2_trans_relock(), since that
@@ -515,9 +519,15 @@ static inline int do_bch2_trans_commit(struct btree_trans *trans,
 	 */
 	trans_for_each_iter(trans, iter) {
 		if (iter->nodes_locked != iter->nodes_intent_locked) {
-			EBUG_ON(iter->flags & BTREE_ITER_KEEP_UNTIL_COMMIT);
-			EBUG_ON(trans->iters_live & (1ULL << iter->idx));
-			bch2_btree_iter_unlock_noinline(iter);
+			if ((iter->flags & BTREE_ITER_KEEP_UNTIL_COMMIT) ||
+			    (trans->iters_live & (1ULL << iter->idx))) {
+				if (!bch2_btree_iter_upgrade(iter, 1)) {
+					trace_trans_restart_upgrade(trans->ip);
+					return -EINTR;
+				}
+			} else {
+				bch2_btree_iter_unlock_noinline(iter);
+			}
 		}
 	}
 
@@ -859,8 +869,8 @@ int __bch2_trans_commit(struct btree_trans *trans)
 		trans_trigger_run = false;
 
 		trans_for_each_update(trans, i) {
-			if (unlikely(i->iter->uptodate > BTREE_ITER_NEED_PEEK &&
-				     (ret = bch2_btree_iter_traverse(i->iter)))) {
+			ret = bch2_btree_iter_traverse(i->iter);
+			if (unlikely(ret)) {
 				trace_trans_restart_traverse(trans->ip);
 				goto out;
 			}
@@ -869,8 +879,8 @@ int __bch2_trans_commit(struct btree_trans *trans)
 			 * We're not using bch2_btree_iter_upgrade here because
 			 * we know trans->nounlock can't be set:
 			 */
-			if (unlikely(i->iter->locks_want < 1 &&
-				     !__bch2_btree_iter_upgrade(i->iter, 1))) {
+			if (unlikely(!btree_node_intent_locked(i->iter, i->iter->level) &&
+				     !__bch2_btree_iter_upgrade(i->iter, i->iter->level + 1))) {
 				trace_trans_restart_upgrade(trans->ip);
 				ret = -EINTR;
 				goto out;
@@ -1074,8 +1084,7 @@ int bch2_btree_delete_at(struct btree_trans *trans,
 
 	bch2_trans_update(trans, iter, &k, 0);
 	return bch2_trans_commit(trans, NULL, NULL,
-				 BTREE_INSERT_NOFAIL|
-				 BTREE_INSERT_USE_RESERVE|flags);
+				 BTREE_INSERT_NOFAIL|flags);
 }
 
 int bch2_btree_delete_range_trans(struct btree_trans *trans, enum btree_id id,

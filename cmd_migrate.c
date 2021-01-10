@@ -301,7 +301,7 @@ static void link_data(struct bch_fs *c, struct bch_inode_unpacked *dst,
 
 	while (length) {
 		struct bkey_i_extent *e;
-		BKEY_PADDED(k) k;
+		__BKEY_PADDED(k, BKEY_EXTENT_VAL_U64s_MAX) k;
 		u64 b = sector_to_bucket(ca, physical);
 		struct disk_reservation res;
 		unsigned sectors;

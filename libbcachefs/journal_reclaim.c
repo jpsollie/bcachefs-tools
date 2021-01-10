@@ -2,6 +2,7 @@
 
 #include "bcachefs.h"
 #include "btree_key_cache.h"
+#include "error.h"
 #include "journal.h"
 #include "journal_io.h"
 #include "journal_reclaim.h"
@@ -159,7 +160,7 @@ void bch2_journal_space_available(struct journal *j)
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 	struct bch_dev *ca;
 	unsigned clean, clean_ondisk, total;
-	unsigned overhead, u64s_remaining = 0;
+	s64 u64s_remaining = 0;
 	unsigned max_entry_size	 = min(j->buf[0].buf_size >> 9,
 				       j->buf[1].buf_size >> 9);
 	unsigned i, nr_online = 0, nr_devs_want;
@@ -208,22 +209,38 @@ void bch2_journal_space_available(struct journal *j)
 	clean		= j->space[journal_space_clean].total;
 	total		= j->space[journal_space_total].total;
 
-	if (!j->space[journal_space_discarded].next_entry)
+	if (!clean_ondisk &&
+	    j->reservations.idx ==
+	    j->reservations.unwritten_idx) {
+		char *buf = kmalloc(4096, GFP_ATOMIC);
+
+		bch_err(c, "journal stuck");
+		if (buf) {
+			__bch2_journal_debug_to_text(&_PBUF(buf, 4096), j);
+			pr_err("\n%s", buf);
+			kfree(buf);
+		}
+
+		bch2_fatal_error(c);
+		ret = cur_entry_journal_stuck;
+	} else if (!j->space[journal_space_discarded].next_entry)
 		ret = cur_entry_journal_full;
 	else if (!fifo_free(&j->pin))
 		ret = cur_entry_journal_pin_full;
 
-	if ((clean - clean_ondisk <= total / 8) &&
+	if ((j->space[journal_space_clean_ondisk].next_entry <
+	     j->space[journal_space_clean_ondisk].total) &&
+	    (clean - clean_ondisk <= total / 8) &&
 	    (clean_ondisk * 2 > clean ))
 		set_bit(JOURNAL_MAY_SKIP_FLUSH, &j->flags);
 	else
 		clear_bit(JOURNAL_MAY_SKIP_FLUSH, &j->flags);
 
-	overhead = DIV_ROUND_UP(clean, max_entry_size) *
-		journal_entry_overhead(j);
-	u64s_remaining = clean << 6;
-	u64s_remaining = max_t(int, 0, u64s_remaining - overhead);
-	u64s_remaining /= 4;
+	u64s_remaining  = (u64) clean << 6;
+	u64s_remaining -= (u64) total << 3;
+	u64s_remaining = max(0LL, u64s_remaining);
+	u64s_remaining /= 2;
+	u64s_remaining = min_t(u64, u64s_remaining, U32_MAX);
 out:
 	j->cur_entry_sectors	= !ret ? j->space[journal_space_discarded].next_entry : 0;
 	j->cur_entry_error	= ret;
@@ -367,11 +384,21 @@ void bch2_journal_pin_set(struct journal *j, u64 seq,
 	struct journal_entry_pin_list *pin_list;
 
 	spin_lock(&j->lock);
+
+	if (seq < journal_last_seq(j)) {
+		/*
+		 * bch2_journal_pin_copy() raced with bch2_journal_pin_drop() on
+		 * the src pin - with the pin dropped, the entry to pin might no
+		 * longer to exist, but that means there's no longer anything to
+		 * copy and we can bail out here:
+		 */
+		spin_unlock(&j->lock);
+		return;
+	}
+
 	pin_list = journal_seq_pin(j, seq);
 
 	__journal_pin_drop(j, pin);
-
-	BUG_ON(!atomic_read(&pin_list->count) && seq == journal_last_seq(j));
 
 	atomic_inc(&pin_list->count);
 	pin->seq	= seq;
@@ -572,6 +599,9 @@ static int __bch2_journal_reclaim(struct journal *j, bool direct)
 		    c->btree_cache.used  * 3)
 			min_nr = 1;
 
+		if (fifo_free(&j->pin) <= 32)
+			min_nr = 1;
+
 		min_nr = max(min_nr, bch2_nr_btree_keys_need_flush(c));
 
 		trace_journal_reclaim_start(c,
@@ -590,7 +620,7 @@ static int __bch2_journal_reclaim(struct journal *j, bool direct)
 		else
 			j->nr_background_reclaim += nr_flushed;
 		trace_journal_reclaim_finish(c, nr_flushed);
-	} while (min_nr);
+	} while (min_nr && nr_flushed);
 
 	memalloc_noreclaim_restore(flags);
 

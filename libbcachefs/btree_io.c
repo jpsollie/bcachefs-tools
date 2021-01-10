@@ -635,7 +635,12 @@ enum btree_validate_ret {
 ({									\
 	__label__ out;							\
 	char _buf[300];							\
+	char *buf2 = _buf;						\
 	struct printbuf out = PBUF(_buf);				\
+									\
+	buf2 = kmalloc(4096, GFP_ATOMIC);				\
+	if (buf2)							\
+		out = _PBUF(buf2, 4986);				\
 									\
 	btree_err_msg(&out, c, b, i, b->written, write);		\
 	pr_buf(&out, ": " msg, ##__VA_ARGS__);				\
@@ -643,13 +648,13 @@ enum btree_validate_ret {
 	if (type == BTREE_ERR_FIXABLE &&				\
 	    write == READ &&						\
 	    !test_bit(BCH_FS_INITIAL_GC_DONE, &c->flags)) {		\
-		mustfix_fsck_err(c, "%s", _buf);			\
+		mustfix_fsck_err(c, "%s", buf2);			\
 		goto out;						\
 	}								\
 									\
 	switch (write) {						\
 	case READ:							\
-		bch_err(c, "%s", _buf);					\
+		bch_err(c, "%s", buf2);					\
 									\
 		switch (type) {						\
 		case BTREE_ERR_FIXABLE:					\
@@ -670,7 +675,7 @@ enum btree_validate_ret {
 		}							\
 		break;							\
 	case WRITE:							\
-		bch_err(c, "corrupt metadata before write: %s", _buf);	\
+		bch_err(c, "corrupt metadata before write: %s", buf2);	\
 									\
 		if (bch2_fs_inconsistent(c)) {				\
 			ret = BCH_FSCK_ERRORS_NOT_FIXED;		\
@@ -679,6 +684,8 @@ enum btree_validate_ret {
 		break;							\
 	}								\
 out:									\
+	if (buf2 != _buf)						\
+		kfree(buf2);						\
 	true;								\
 })
 
@@ -844,7 +851,7 @@ static int validate_bset_keys(struct bch_fs *c, struct btree *b,
 
 			bch2_bkey_val_to_text(&PBUF(buf), c, u.s_c);
 			btree_err(BTREE_ERR_FIXABLE, c, b, i,
-				  "invalid bkey:\n%s\n%s", invalid, buf);
+				  "invalid bkey: %s\n%s", invalid, buf);
 
 			i->u64s = cpu_to_le16(le16_to_cpu(i->u64s) - k->u64s);
 			memmove_u64s_down(k, bkey_next(k),
@@ -1313,12 +1320,13 @@ static void bch2_btree_node_write_error(struct bch_fs *c,
 					struct btree_write_bio *wbio)
 {
 	struct btree *b		= wbio->wbio.bio.bi_private;
-	__BKEY_PADDED(k, BKEY_BTREE_PTR_VAL_U64s_MAX) tmp;
+	struct bkey_buf k;
 	struct bch_extent_ptr *ptr;
 	struct btree_trans trans;
 	struct btree_iter *iter;
 	int ret;
 
+	bch2_bkey_buf_init(&k);
 	bch2_trans_init(&trans, c, 0, 0);
 
 	iter = bch2_trans_get_node_iter(&trans, b->c.btree_id, b->key.k.p,
@@ -1337,21 +1345,22 @@ retry:
 
 	BUG_ON(!btree_node_hashed(b));
 
-	bkey_copy(&tmp.k, &b->key);
+	bch2_bkey_buf_copy(&k, c, &b->key);
 
-	bch2_bkey_drop_ptrs(bkey_i_to_s(&tmp.k), ptr,
+	bch2_bkey_drop_ptrs(bkey_i_to_s(k.k), ptr,
 		bch2_dev_list_has_dev(wbio->wbio.failed, ptr->dev));
 
-	if (!bch2_bkey_nr_ptrs(bkey_i_to_s_c(&tmp.k)))
+	if (!bch2_bkey_nr_ptrs(bkey_i_to_s_c(k.k)))
 		goto err;
 
-	ret = bch2_btree_node_update_key(c, iter, b, &tmp.k);
+	ret = bch2_btree_node_update_key(c, iter, b, k.k);
 	if (ret == -EINTR)
 		goto retry;
 	if (ret)
 		goto err;
 out:
 	bch2_trans_exit(&trans);
+	bch2_bkey_buf_exit(&k, c);
 	bio_put(&wbio->wbio.bio);
 	btree_node_write_done(c, b);
 	return;
@@ -1469,7 +1478,7 @@ void __bch2_btree_node_write(struct bch_fs *c, struct btree *b,
 	struct bset *i;
 	struct btree_node *bn = NULL;
 	struct btree_node_entry *bne = NULL;
-	BKEY_PADDED(key) k;
+	struct bkey_buf k;
 	struct bch_extent_ptr *ptr;
 	struct sort_iter sort_iter;
 	struct nonce nonce;
@@ -1479,6 +1488,8 @@ void __bch2_btree_node_write(struct bch_fs *c, struct btree *b,
 	unsigned long old, new;
 	bool validate_before_checksum = false;
 	void *data;
+
+	bch2_bkey_buf_init(&k);
 
 	if (test_bit(BCH_FS_HOLD_BTREE_WRITES, &c->flags))
 		return;
@@ -1688,15 +1699,16 @@ void __bch2_btree_node_write(struct bch_fs *c, struct btree *b,
 	 * just make all btree node writes FUA to keep things sane.
 	 */
 
-	bkey_copy(&k.key, &b->key);
+	bch2_bkey_buf_copy(&k, c, &b->key);
 
-	bkey_for_each_ptr(bch2_bkey_ptrs(bkey_i_to_s(&k.key)), ptr)
+	bkey_for_each_ptr(bch2_bkey_ptrs(bkey_i_to_s(k.k)), ptr)
 		ptr->offset += b->written;
 
 	b->written += sectors_to_write;
 
 	/* XXX: submitting IO with btree locks held: */
-	bch2_submit_wbio_replicas(&wbio->wbio, c, BCH_DATA_btree, &k.key);
+	bch2_submit_wbio_replicas(&wbio->wbio, c, BCH_DATA_btree, k.k);
+	bch2_bkey_buf_exit(&k, c);
 	return;
 err:
 	set_btree_node_noevict(b);

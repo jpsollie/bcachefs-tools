@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include "bcachefs.h"
+#include "bkey_buf.h"
 #include "alloc_background.h"
 #include "btree_gc.h"
 #include "btree_update.h"
@@ -224,28 +225,29 @@ static int bch2_btree_and_journal_walk_recurse(struct bch_fs *c, struct btree *b
 
 		if (b->c.level) {
 			struct btree *child;
-			BKEY_PADDED(k) tmp;
+			struct bkey_buf tmp;
 
-			bkey_reassemble(&tmp.k, k);
-			k = bkey_i_to_s_c(&tmp.k);
+			bch2_bkey_buf_init(&tmp);
+			bch2_bkey_buf_reassemble(&tmp, c, k);
+			k = bkey_i_to_s_c(tmp.k);
 
 			bch2_btree_and_journal_iter_advance(&iter);
 
-			if (b->c.level > 0) {
-				child = bch2_btree_node_get_noiter(c, &tmp.k,
-							b->c.btree_id, b->c.level - 1);
-				ret = PTR_ERR_OR_ZERO(child);
-				if (ret)
-					break;
+			child = bch2_btree_node_get_noiter(c, tmp.k,
+						b->c.btree_id, b->c.level - 1);
+			bch2_bkey_buf_exit(&tmp, c);
 
-				ret   = (node_fn ? node_fn(c, b) : 0) ?:
-					bch2_btree_and_journal_walk_recurse(c, child,
-						journal_keys, btree_id, node_fn, key_fn);
-				six_unlock_read(&child->c.lock);
+			ret = PTR_ERR_OR_ZERO(child);
+			if (ret)
+				break;
 
-				if (ret)
-					break;
-			}
+			ret   = (node_fn ? node_fn(c, b) : 0) ?:
+				bch2_btree_and_journal_walk_recurse(c, child,
+					journal_keys, btree_id, node_fn, key_fn);
+			six_unlock_read(&child->c.lock);
+
+			if (ret)
+				break;
 		} else {
 			bch2_btree_and_journal_iter_advance(&iter);
 		}
@@ -458,7 +460,9 @@ retry:
 		bch2_btree_iter_set_pos(iter, split->k.p);
 
 		if (remark) {
-			ret = bch2_trans_mark_key(&trans, bkey_i_to_s_c(split),
+			ret = bch2_trans_mark_key(&trans,
+						  bkey_s_c_null,
+						  bkey_i_to_s_c(split),
 						  0, split->k.size,
 						  BTREE_TRIGGER_INSERT);
 			if (ret)
@@ -467,7 +471,9 @@ retry:
 	} while (bkey_cmp(iter->pos, k->k.p) < 0);
 
 	if (remark) {
-		ret = bch2_trans_mark_key(&trans, bkey_i_to_s_c(k),
+		ret = bch2_trans_mark_key(&trans,
+					  bkey_i_to_s_c(k),
+					  bkey_s_c_null,
 					  0, -((s64) k->k.size),
 					  BTREE_TRIGGER_OVERWRITE);
 		if (ret)
@@ -932,7 +938,7 @@ int bch2_fs_recovery(struct bch_fs *c)
 	struct bch_sb_field_clean *clean = NULL;
 	struct jset *last_journal_entry = NULL;
 	u64 blacklist_seq, journal_seq;
-	bool write_sb = false, need_write_alloc = false;
+	bool write_sb = false;
 	int ret;
 
 	if (c->sb.clean)
@@ -1078,10 +1084,8 @@ use_clean:
 		bch_info(c, "starting metadata mark and sweep");
 		err = "error in mark and sweep";
 		ret = bch2_gc(c, &c->journal_keys, true, true);
-		if (ret < 0)
-			goto err;
 		if (ret)
-			need_write_alloc = true;
+			goto err;
 		bch_verbose(c, "mark and sweep done");
 	}
 
@@ -1091,10 +1095,8 @@ use_clean:
 		bch_info(c, "starting mark and sweep");
 		err = "error in mark and sweep";
 		ret = bch2_gc(c, &c->journal_keys, true, false);
-		if (ret < 0)
-			goto err;
 		if (ret)
-			need_write_alloc = true;
+			goto err;
 		bch_verbose(c, "mark and sweep done");
 	}
 
@@ -1118,7 +1120,8 @@ use_clean:
 		goto err;
 	bch_verbose(c, "journal replay done");
 
-	if (need_write_alloc && !c->opts.nochanges) {
+	if (test_bit(BCH_FS_NEED_ALLOC_WRITE, &c->flags) &&
+	    !c->opts.nochanges) {
 		/*
 		 * note that even when filesystem was clean there might be work
 		 * to do here, if we ran gc (because of fsck) which recalculated
@@ -1133,8 +1136,6 @@ use_clean:
 			goto err;
 		}
 		bch_verbose(c, "alloc write done");
-
-		set_bit(BCH_FS_ALLOC_WRITTEN, &c->flags);
 	}
 
 	if (!c->sb.clean) {

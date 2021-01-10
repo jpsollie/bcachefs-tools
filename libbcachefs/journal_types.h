@@ -20,7 +20,7 @@
 struct journal_buf {
 	struct jset		*data;
 
-	BKEY_PADDED(key);
+	__BKEY_PADDED(key, BCH_REPLICAS_MAX);
 
 	struct closure_waitlist	wait;
 
@@ -172,6 +172,7 @@ struct journal {
 		cur_entry_blocked,
 		cur_entry_journal_full,
 		cur_entry_journal_pin_full,
+		cur_entry_journal_stuck,
 		cur_entry_insufficient_devices,
 	}			cur_entry_error;
 

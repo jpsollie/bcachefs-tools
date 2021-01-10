@@ -34,14 +34,12 @@ struct bucket_clock {
 	struct mutex		lock;
 };
 
-/* There is one reserve for each type of btree, one for prios and gens
- * and one for moving GC */
 enum alloc_reserve {
-	RESERVE_ALLOC		= -1,
-	RESERVE_BTREE		= 0,
-	RESERVE_MOVINGGC	= 1,
-	RESERVE_NONE		= 2,
-	RESERVE_NR		= 3,
+	RESERVE_BTREE_MOVINGGC	= -2,
+	RESERVE_BTREE		= -1,
+	RESERVE_MOVINGGC	= 0,
+	RESERVE_NONE		= 1,
+	RESERVE_NR		= 2,
 };
 
 typedef FIFO(long)	alloc_fifo;
@@ -89,7 +87,6 @@ struct write_point {
 	u64			last_used;
 	unsigned long		write_point;
 	enum bch_data_type	type;
-	bool			is_ec;
 
 	/* calculated based on how many pointers we're actually going to use: */
 	unsigned		sectors_free;
