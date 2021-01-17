@@ -106,8 +106,6 @@ static void sched_init(void)
 {
 	struct task_struct *p = malloc(sizeof(*p));
 
-	mlockall(MCL_CURRENT|MCL_FUTURE);
-
 	memset(p, 0, sizeof(*p));
 
 	p->state	= TASK_RUNNING;

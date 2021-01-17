@@ -22,7 +22,7 @@ static void print_dev_usage_type(const char *type,
 	u64 frag = max((s64) buckets * bucket_size - (s64) sectors, 0LL);
 
 	printf_pad(20, "  %s:", type);
-	printf("%12s%12llu%12s\n",
+	printf(" %15s %15llu %15s\n",
 	       pr_units(sectors, units),
 	       buckets,
 	       pr_units(frag, units));
@@ -37,18 +37,17 @@ static void print_dev_usage(struct bchfs_handle fs,
 
 	printf("\n");
 	printf_pad(20, "%s (device %u):", d->label ?: "(no label)", d->idx);
-	printf("%24s%12s\n", d->dev ?: "(device not found)", bch2_dev_state[u.state]);
+	printf("%30s%16s\n", d->dev ?: "(device not found)", bch2_dev_state[u.state]);
 
-	printf("%-20s%12s%12s%12s\n",
+	printf("%-20s%16s%16s%16s\n",
 	       "", "data", "buckets", "fragmented");
 
-	for (i = BCH_DATA_sb; i < BCH_DATA_NR; i++) {
+	for (i = BCH_DATA_sb; i < BCH_DATA_NR; i++)
 		print_dev_usage_type(bch2_data_types[i],
 				     u.bucket_size,
 				     u.buckets[i],
 				     u.sectors[i],
 				     units);
-	}
 
 	print_dev_usage_type("erasure coded",
 			     u.bucket_size,
@@ -57,12 +56,12 @@ static void print_dev_usage(struct bchfs_handle fs,
 			     units);
 
 	printf_pad(20, "  available:");
-	printf("%12s%12llu\n",
+	printf(" %15s %15llu\n",
 	       pr_units(u.available_buckets * u.bucket_size, units),
 	       u.available_buckets);
 
 	printf_pad(20, "  capacity:");
-	printf("%12s%12llu\n",
+	printf(" %15s %15llu\n",
 	       pr_units(u.nr_buckets * u.bucket_size, units),
 	       u.nr_buckets);
 }
