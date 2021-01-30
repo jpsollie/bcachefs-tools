@@ -748,6 +748,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 
 	printf("External UUID:			%s\n"
 	       "Internal UUID:			%s\n"
+	       "Device index:			%u\n"
 	       "Label:				%s\n"
 	       "Version:			%llu\n"
 	       "Created:			%s\n"
@@ -779,6 +780,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	       "Superblock size:		%llu\n",
 	       user_uuid_str,
 	       internal_uuid_str,
+	       sb->dev_idx,
 	       label,
 	       le64_to_cpu(sb->version),
 	       time_str,
