@@ -825,8 +825,29 @@ static int journal_replay_entry_early(struct bch_fs *c,
 	case BCH_JSET_ENTRY_data_usage: {
 		struct jset_entry_data_usage *u =
 			container_of(entry, struct jset_entry_data_usage, entry);
+
 		ret = bch2_replicas_set_usage(c, &u->r,
 					      le64_to_cpu(u->v));
+		break;
+	}
+	case BCH_JSET_ENTRY_dev_usage: {
+		struct jset_entry_dev_usage *u =
+			container_of(entry, struct jset_entry_dev_usage, entry);
+		struct bch_dev *ca = bch_dev_bkey_exists(c, u->dev);
+		unsigned bytes = jset_u64s(le16_to_cpu(entry->u64s)) * sizeof(u64);
+		unsigned nr_types = (bytes - sizeof(struct jset_entry_dev_usage)) /
+			sizeof(struct jset_entry_dev_usage_type);
+		unsigned i;
+
+		ca->usage_base->buckets_ec		= le64_to_cpu(u->buckets_ec);
+		ca->usage_base->buckets_unavailable	= le64_to_cpu(u->buckets_unavailable);
+
+		for (i = 0; i < nr_types; i++) {
+			ca->usage_base->d[i].buckets	= le64_to_cpu(u->d[i].buckets);
+			ca->usage_base->d[i].sectors	= le64_to_cpu(u->d[i].sectors);
+			ca->usage_base->d[i].fragmented	= le64_to_cpu(u->d[i].fragmented);
+		}
+
 		break;
 	}
 	case BCH_JSET_ENTRY_blacklist: {
@@ -847,6 +868,12 @@ static int journal_replay_entry_early(struct bch_fs *c,
 				le64_to_cpu(bl_entry->end) + 1);
 		break;
 	}
+	case BCH_JSET_ENTRY_clock: {
+		struct jset_entry_clock *clock =
+			container_of(entry, struct jset_entry_clock, entry);
+
+		atomic64_set(&c->io_clock[clock->rw].now, clock->time);
+	}
 	}
 
 	return ret;
@@ -861,9 +888,6 @@ static int journal_replay_early(struct bch_fs *c,
 	int ret;
 
 	if (clean) {
-		c->bucket_clock[READ].hand = le16_to_cpu(clean->read_clock);
-		c->bucket_clock[WRITE].hand = le16_to_cpu(clean->write_clock);
-
 		for (entry = clean->start;
 		     entry != vstruct_end(&clean->field);
 		     entry = vstruct_next(entry)) {
@@ -875,9 +899,6 @@ static int journal_replay_early(struct bch_fs *c,
 		list_for_each_entry(i, journal, list) {
 			if (i->ignore)
 				continue;
-
-			c->bucket_clock[READ].hand = le16_to_cpu(i->j.read_clock);
-			c->bucket_clock[WRITE].hand = le16_to_cpu(i->j.write_clock);
 
 			vstruct_for_each(&i->j, entry) {
 				ret = journal_replay_entry_early(c, entry);
@@ -941,13 +962,6 @@ static int verify_superblock_clean(struct bch_fs *c,
 		*cleanp = NULL;
 		return 0;
 	}
-
-	mustfix_fsck_err_on(j->read_clock != clean->read_clock, c,
-			"superblock read clock %u doesn't match journal %u after clean shutdown",
-			clean->read_clock, j->read_clock);
-	mustfix_fsck_err_on(j->write_clock != clean->write_clock, c,
-			"superblock write clock %u doesn't match journal %u after clean shutdown",
-			clean->write_clock, j->write_clock);
 
 	for (i = 0; i < BTREE_ID_NR; i++) {
 		char buf1[200], buf2[200];
