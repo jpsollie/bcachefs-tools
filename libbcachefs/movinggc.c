@@ -92,8 +92,11 @@ static enum data_cmd copygc_pred(struct bch_fs *c, void *arg,
 			data_opts->btree_insert_flags	= BTREE_INSERT_USE_RESERVE;
 			data_opts->rewrite_dev		= p.ptr.dev;
 
-			if (p.has_ec)
-				data_opts->nr_replicas += p.ec.redundancy;
+			if (p.has_ec) {
+				struct stripe *m = genradix_ptr(&c->stripes[0], p.ec.idx);
+
+				data_opts->nr_replicas += m->nr_redundant;
+			}
 
 			return DATA_REWRITE;
 		}
@@ -176,12 +179,12 @@ static int bch2_copygc(struct bch_fs *c)
 			    bucket_sectors_used(m) >= ca->mi.bucket_size)
 				continue;
 
-			WARN_ON(m.stripe && !g->stripe_redundancy);
+			WARN_ON(m.stripe && !g->ec_redundancy);
 
 			e = (struct copygc_heap_entry) {
 				.dev		= dev_idx,
 				.gen		= m.gen,
-				.replicas	= 1 + g->stripe_redundancy,
+				.replicas	= 1 + g->ec_redundancy,
 				.fragmentation	= bucket_sectors_used(m) * (1U << 15)
 					/ ca->mi.bucket_size,
 				.sectors	= bucket_sectors_used(m),
@@ -298,7 +301,7 @@ static int bch2_copygc_thread(void *arg)
 {
 	struct bch_fs *c = arg;
 	struct io_clock *clock = &c->io_clock[WRITE];
-	u64 last, wait;
+	unsigned long last, wait;
 
 	set_freezable();
 
@@ -306,7 +309,7 @@ static int bch2_copygc_thread(void *arg)
 		if (kthread_wait_freezable(c->copy_gc_enabled))
 			break;
 
-		last = atomic64_read(&clock->now);
+		last = atomic_long_read(&clock->now);
 		wait = bch2_copygc_wait_amount(c);
 
 		if (wait > clock->max_slop) {

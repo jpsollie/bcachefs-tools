@@ -638,6 +638,8 @@ static void bch2_sb_print_clean(struct bch_sb *sb, struct bch_sb_field *f,
 
 
 	printf("  flags:       %x", le32_to_cpu(clean->flags));
+	printf("  read clock:  %x", le16_to_cpu(clean->read_clock));
+	printf("  write clock: %x", le16_to_cpu(clean->write_clock));
 	printf("  journal seq: %llx", le64_to_cpu(clean->journal_seq));
 }
 

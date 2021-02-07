@@ -1117,6 +1117,10 @@ int bch2_fs_journal_init(struct journal *j)
 	j->write_delay_ms	= 1000;
 	j->reclaim_delay_ms	= 100;
 
+	/* Btree roots: */
+	j->entry_u64s_reserved +=
+		BTREE_ID_NR * (JSET_KEYS_U64s + BKEY_BTREE_PTR_U64s_MAX);
+
 	atomic64_set(&j->reservations.counter,
 		((union journal_res_state)
 		 { .cur_entry_offset = JOURNAL_ENTRY_CLOSED_VAL }).v);
