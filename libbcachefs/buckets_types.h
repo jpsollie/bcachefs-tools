@@ -37,12 +37,11 @@ struct bucket {
 		const struct bucket_mark mark;
 	};
 
-	u64				io_time[2];
+	u16				io_time[2];
 	u8				oldest_gen;
 	u8				gc_gen;
 	unsigned			gen_valid:1;
-	u8				stripe_redundancy;
-	u32				stripe;
+	u8				ec_redundancy;
 };
 
 struct bucket_array {
