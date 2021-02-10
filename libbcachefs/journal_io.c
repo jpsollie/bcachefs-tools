@@ -5,6 +5,7 @@
 #include "btree_update_interior.h"
 #include "buckets.h"
 #include "checksum.h"
+#include "disk_groups.h"
 #include "error.h"
 #include "io.h"
 #include "journal.h"
@@ -418,6 +419,69 @@ static int journal_entry_validate_data_usage(struct bch_fs *c,
 				 bytes < sizeof(*u) + u->r.nr_devs,
 				 c,
 				 "invalid journal entry usage: bad size")) {
+		journal_entry_null_range(entry, vstruct_next(entry));
+		return ret;
+	}
+
+fsck_err:
+	return ret;
+}
+
+static int journal_entry_validate_clock(struct bch_fs *c,
+					struct jset *jset,
+					struct jset_entry *entry,
+					int write)
+{
+	struct jset_entry_clock *clock =
+		container_of(entry, struct jset_entry_clock, entry);
+	unsigned bytes = jset_u64s(le16_to_cpu(entry->u64s)) * sizeof(u64);
+	int ret = 0;
+
+	if (journal_entry_err_on(bytes != sizeof(*clock),
+				 c, "invalid journal entry clock: bad size")) {
+		journal_entry_null_range(entry, vstruct_next(entry));
+		return ret;
+	}
+
+	if (journal_entry_err_on(clock->rw > 1,
+				 c, "invalid journal entry clock: bad rw")) {
+		journal_entry_null_range(entry, vstruct_next(entry));
+		return ret;
+	}
+
+fsck_err:
+	return ret;
+}
+
+static int journal_entry_validate_dev_usage(struct bch_fs *c,
+					    struct jset *jset,
+					    struct jset_entry *entry,
+					    int write)
+{
+	struct jset_entry_dev_usage *u =
+		container_of(entry, struct jset_entry_dev_usage, entry);
+	unsigned bytes = jset_u64s(le16_to_cpu(entry->u64s)) * sizeof(u64);
+	unsigned expected = sizeof(*u) + sizeof(u->d[0]) * 7; /* Current value of BCH_DATA_NR */
+	unsigned dev;
+	int ret = 0;
+
+	if (journal_entry_err_on(bytes < expected,
+				 c, "invalid journal entry dev usage: bad size (%u < %u)",
+				 bytes, expected)) {
+		journal_entry_null_range(entry, vstruct_next(entry));
+		return ret;
+	}
+
+	dev = le32_to_cpu(u->dev);
+
+	if (journal_entry_err_on(!bch2_dev_exists2(c, dev),
+				 c, "invalid journal entry dev usage: bad dev")) {
+		journal_entry_null_range(entry, vstruct_next(entry));
+		return ret;
+	}
+
+	if (journal_entry_err_on(u->pad,
+				 c, "invalid journal entry dev usage: bad pad")) {
 		journal_entry_null_range(entry, vstruct_next(entry));
 		return ret;
 	}
@@ -937,6 +1001,8 @@ int bch2_journal_read(struct bch_fs *c, struct list_head *list,
 		for (ptr = 0; ptr < i->nr_ptrs; ptr++)
 			replicas.e.devs[replicas.e.nr_devs++] = i->ptrs[ptr].dev;
 
+		bch2_replicas_entry_sort(&replicas.e);
+
 		/*
 		 * If we're mounting in degraded mode - if we didn't read all
 		 * the devices - this is wrong:
@@ -1032,16 +1098,20 @@ static int journal_write_alloc(struct journal *j, struct journal_buf *w,
 			       unsigned sectors)
 {
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
+	struct bch_devs_mask devs;
 	struct journal_device *ja;
 	struct bch_dev *ca;
 	struct dev_alloc_list devs_sorted;
+	unsigned target = c->opts.metadata_target ?:
+		c->opts.foreground_target;
 	unsigned i, replicas = 0, replicas_want =
 		READ_ONCE(c->opts.metadata_replicas);
 
 	rcu_read_lock();
+retry:
+	devs = target_rw_devs(c, BCH_DATA_journal, target);
 
-	devs_sorted = bch2_dev_alloc_list(c, &j->wp.stripe,
-					  &c->rw_devs[BCH_DATA_journal]);
+	devs_sorted = bch2_dev_alloc_list(c, &j->wp.stripe, &devs);
 
 	__journal_write_alloc(j, w, &devs_sorted,
 			      sectors, &replicas, replicas_want);
@@ -1073,6 +1143,12 @@ static int journal_write_alloc(struct journal *j, struct journal_buf *w,
 
 	__journal_write_alloc(j, w, &devs_sorted,
 			      sectors, &replicas, replicas_want);
+
+	if (replicas < replicas_want && target) {
+		/* Retry from all devices: */
+		target = 0;
+		goto retry;
+	}
 done:
 	rcu_read_unlock();
 
@@ -1278,6 +1354,9 @@ static void do_journal_write(struct closure *cl)
 		bio->bi_private		= ca;
 		bio->bi_opf		= REQ_OP_WRITE|REQ_SYNC|REQ_META;
 
+		BUG_ON(bio->bi_iter.bi_sector == ca->prev_journal_sector);
+		ca->prev_journal_sector = bio->bi_iter.bi_sector;
+
 		if (!JSET_NO_FLUSH(w->data))
 			bio->bi_opf    |= REQ_FUA;
 		if (!JSET_NO_FLUSH(w->data) && !w->separate_flush)
@@ -1348,8 +1427,8 @@ void bch2_journal_write(struct closure *cl)
 
 	end	= bch2_btree_roots_to_journal_entries(c, jset->start, end);
 
-	end	= bch2_journal_super_entries_add_common(c, end,
-						le64_to_cpu(jset->seq));
+	bch2_journal_super_entries_add_common(c, &end,
+				le64_to_cpu(jset->seq));
 	u64s	= (u64 *) end - (u64 *) start;
 	BUG_ON(u64s > j->entry_u64s_reserved);
 
@@ -1358,10 +1437,7 @@ void bch2_journal_write(struct closure *cl)
 
 	journal_write_compact(jset);
 
-	jset->read_clock	= cpu_to_le16(c->bucket_clock[READ].hand);
-	jset->write_clock	= cpu_to_le16(c->bucket_clock[WRITE].hand);
 	jset->magic		= cpu_to_le64(jset_magic(c));
-
 	jset->version		= c->sb.version < bcachefs_metadata_version_new_versioning
 		? cpu_to_le32(BCH_JSET_VERSION_OLD)
 		: cpu_to_le32(c->sb.version);

@@ -572,14 +572,10 @@ int cmd_list_journal(int argc, char *argv[])
 		printf("journal entry   %8llu\n"
 		       "    version     %8u\n"
 		       "    last seq    %8llu\n"
-		       "    read clock  %8u\n"
-		       "    write clock %8u\n"
 		       ,
 		       le64_to_cpu(p->j.seq),
 		       le32_to_cpu(p->j.version),
-		       le64_to_cpu(p->j.last_seq),
-		       le16_to_cpu(p->j.read_clock),
-		       le16_to_cpu(p->j.write_clock));
+		       le64_to_cpu(p->j.last_seq));
 
 		for_each_jset_key(k, _n, entry, &p->j) {
 			char buf[200];
