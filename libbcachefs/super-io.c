@@ -939,7 +939,7 @@ void bch2_sb_clean_renumber(struct bch_sb_field_clean *clean, int write)
 	for (entry = clean->start;
 	     entry < (struct jset_entry *) vstruct_end(&clean->field);
 	     entry = vstruct_next(entry))
-		bch2_bkey_renumber(BKEY_TYPE_BTREE, bkey_to_packed(entry->start), write);
+		bch2_bkey_renumber(BKEY_TYPE_btree, bkey_to_packed(entry->start), write);
 }
 
 int bch2_fs_mark_dirty(struct bch_fs *c)
@@ -953,9 +953,7 @@ int bch2_fs_mark_dirty(struct bch_fs *c)
 
 	mutex_lock(&c->sb_lock);
 	SET_BCH_SB_CLEAN(c->disk_sb.sb, false);
-	c->disk_sb.sb->features[0] |= 1ULL << BCH_FEATURE_new_extent_overwrite;
-	c->disk_sb.sb->features[0] |= 1ULL << BCH_FEATURE_extents_above_btree_updates;
-	c->disk_sb.sb->features[0] |= 1ULL << BCH_FEATURE_btree_updates_journalled;
+	c->disk_sb.sb->features[0] |= BCH_SB_FEATURES_ALWAYS;
 	ret = bch2_write_super(c);
 	mutex_unlock(&c->sb_lock);
 

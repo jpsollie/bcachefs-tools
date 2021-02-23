@@ -433,7 +433,7 @@ static int get_stripe_key(struct bch_fs *c, u64 idx, struct ec_stripe_buf *strip
 	int ret;
 
 	bch2_trans_init(&trans, c, 0, 0);
-	iter = bch2_trans_get_iter(&trans, BTREE_ID_EC, POS(0, idx), BTREE_ITER_SLOTS);
+	iter = bch2_trans_get_iter(&trans, BTREE_ID_stripes, POS(0, idx), BTREE_ITER_SLOTS);
 	k = bch2_btree_iter_peek_slot(iter);
 	ret = bkey_err(k);
 	if (ret)
@@ -668,7 +668,7 @@ void bch2_stripes_heap_update(struct bch_fs *c,
 
 static int ec_stripe_delete(struct bch_fs *c, size_t idx)
 {
-	return bch2_btree_delete_range(c, BTREE_ID_EC,
+	return bch2_btree_delete_range(c, BTREE_ID_stripes,
 				       POS(0, idx),
 				       POS(0, idx + 1),
 				       NULL);
@@ -713,7 +713,7 @@ static int ec_stripe_bkey_insert(struct bch_fs *c,
 retry:
 	bch2_trans_begin(&trans);
 
-	for_each_btree_key(&trans, iter, BTREE_ID_EC, start_pos,
+	for_each_btree_key(&trans, iter, BTREE_ID_stripes, start_pos,
 			   BTREE_ITER_SLOTS|BTREE_ITER_INTENT, k, ret) {
 		if (bkey_cmp(k.k->p, POS(0, U32_MAX)) > 0) {
 			if (start_pos.offset) {
@@ -765,7 +765,7 @@ static int ec_stripe_bkey_update(struct btree_trans *trans,
 	unsigned i;
 	int ret;
 
-	iter = bch2_trans_get_iter(trans, BTREE_ID_EC,
+	iter = bch2_trans_get_iter(trans, BTREE_ID_stripes,
 				   new->k.p, BTREE_ITER_INTENT);
 	k = bch2_btree_iter_peek_slot(iter);
 	ret = bkey_err(k);
@@ -831,7 +831,7 @@ static int ec_stripe_update_ptrs(struct bch_fs *c,
 
 	/* XXX this doesn't support the reflink btree */
 
-	iter = bch2_trans_get_iter(&trans, BTREE_ID_EXTENTS,
+	iter = bch2_trans_get_iter(&trans, BTREE_ID_extents,
 				   bkey_start_pos(pos),
 				   BTREE_ITER_INTENT);
 
@@ -1389,6 +1389,72 @@ static s64 get_existing_stripe(struct bch_fs *c,
 	return ret;
 }
 
+static int __bch2_ec_stripe_head_reuse(struct bch_fs *c,
+						   struct ec_stripe_head *h)
+{
+	unsigned i;
+	s64 idx;
+	int ret;
+
+	idx = get_existing_stripe(c, h);
+	if (idx < 0) {
+		bch_err(c, "failed to find an existing stripe");
+		return -ENOSPC;
+	}
+
+	h->s->have_existing_stripe = true;
+	ret = get_stripe_key(c, idx, &h->s->existing_stripe);
+	if (ret) {
+		bch2_fs_fatal_error(c, "error reading stripe key: %i", ret);
+		return ret;
+	}
+
+	if (ec_stripe_buf_init(&h->s->existing_stripe, 0, h->blocksize)) {
+		/*
+		 * this is a problem: we have deleted from the
+		 * stripes heap already
+		 */
+		BUG();
+	}
+
+	BUG_ON(h->s->existing_stripe.size != h->blocksize);
+	BUG_ON(h->s->existing_stripe.size != h->s->existing_stripe.key.v.sectors);
+
+	for (i = 0; i < h->s->existing_stripe.key.v.nr_blocks; i++) {
+		if (stripe_blockcount_get(&h->s->existing_stripe.key.v, i)) {
+			__set_bit(i, h->s->blocks_gotten);
+			__set_bit(i, h->s->blocks_allocated);
+		}
+
+		ec_block_io(c, &h->s->existing_stripe, READ, i, &h->s->iodone);
+	}
+
+	bkey_copy(&h->s->new_stripe.key.k_i,
+			&h->s->existing_stripe.key.k_i);
+
+	return 0;
+}
+
+static int __bch2_ec_stripe_head_reserve(struct bch_fs *c,
+							struct ec_stripe_head *h)
+{
+	int ret;
+
+	ret = bch2_disk_reservation_get(c, &h->s->res,
+			h->blocksize,
+			h->s->nr_parity, 0);
+
+	if (ret) {
+		/*
+		 * This means we need to wait for copygc to
+		 * empty out buckets from existing stripes:
+		 */
+		bch_err(c, "failed to reserve stripe");
+	}
+
+	return ret;
+}
+
 struct ec_stripe_head *bch2_ec_stripe_head_get(struct bch_fs *c,
 					       unsigned target,
 					       unsigned algo,
@@ -1397,9 +1463,8 @@ struct ec_stripe_head *bch2_ec_stripe_head_get(struct bch_fs *c,
 					       struct closure *cl)
 {
 	struct ec_stripe_head *h;
-	unsigned i;
-	s64 idx;
 	int ret;
+	bool needs_stripe_new;
 
 	h = __bch2_ec_stripe_head_get(c, target, algo, redundancy, copygc);
 	if (!h) {
@@ -1407,80 +1472,44 @@ struct ec_stripe_head *bch2_ec_stripe_head_get(struct bch_fs *c,
 		return NULL;
 	}
 
-	if (!h->s) {
+	needs_stripe_new = !h->s;
+	if (needs_stripe_new) {
 		if (ec_new_stripe_alloc(c, h)) {
-			bch2_ec_stripe_head_put(c, h);
+			ret = -ENOMEM;
 			bch_err(c, "failed to allocate new stripe");
-			return NULL;
+			goto err;
 		}
 
-		idx = get_existing_stripe(c, h);
-		if (idx >= 0) {
-			h->s->have_existing_stripe = true;
-			ret = get_stripe_key(c, idx, &h->s->existing_stripe);
-			if (ret) {
-				bch2_fs_fatal_error(c, "error reading stripe key: %i", ret);
-				bch2_ec_stripe_head_put(c, h);
-				return NULL;
-			}
-
-			if (ec_stripe_buf_init(&h->s->existing_stripe, 0, h->blocksize)) {
-				/*
-				 * this is a problem: we have deleted from the
-				 * stripes heap already
-				 */
-				BUG();
-			}
-
-			BUG_ON(h->s->existing_stripe.size != h->blocksize);
-			BUG_ON(h->s->existing_stripe.size != h->s->existing_stripe.key.v.sectors);
-
-			for (i = 0; i < h->s->existing_stripe.key.v.nr_blocks; i++) {
-				if (stripe_blockcount_get(&h->s->existing_stripe.key.v, i)) {
-					__set_bit(i, h->s->blocks_gotten);
-					__set_bit(i, h->s->blocks_allocated);
-				}
-
-				ec_block_io(c, &h->s->existing_stripe, READ, i, &h->s->iodone);
-			}
-
-			bkey_copy(&h->s->new_stripe.key.k_i,
-				  &h->s->existing_stripe.key.k_i);
-		}
-
-		if (ec_stripe_buf_init(&h->s->new_stripe, 0, h->blocksize)) {
+		if (ec_stripe_buf_init(&h->s->new_stripe, 0, h->blocksize))
 			BUG();
-		}
 	}
 
-	if (!h->s->allocated) {
-		if (!h->s->have_existing_stripe &&
-		    !h->s->res.sectors) {
-			ret = bch2_disk_reservation_get(c, &h->s->res,
-					h->blocksize,
-					h->s->nr_parity, 0);
-			if (ret) {
-				/*
-				 * This means we need to wait for copygc to
-				 * empty out buckets from existing stripes:
-				 */
-				bch2_ec_stripe_head_put(c, h);
-				h = NULL;
-				goto out;
-			}
-		}
+	/*
+	 * Try reserve a new stripe before reusing an
+	 * existing stripe. This will prevent unnecessary
+	 * read amplification during write oriented workloads.
+	 */
+	ret = 0;
+	if (!h->s->allocated && !h->s->res.sectors && !h->s->have_existing_stripe)
+		ret = __bch2_ec_stripe_head_reserve(c, h);
+	if (ret && needs_stripe_new)
+		ret = __bch2_ec_stripe_head_reuse(c, h);
+	if (ret)
+		goto err;
 
+	if (!h->s->allocated) {
 		ret = new_stripe_alloc_buckets(c, h, cl);
-		if (ret) {
-			bch2_ec_stripe_head_put(c, h);
-			h = ERR_PTR(-ret);
-			goto out;
-		}
+		if (ret)
+			goto err;
 
 		h->s->allocated = true;
 	}
-out:
+
 	return h;
+
+err:
+	bch2_ec_stripe_head_put(c, h);
+	return ERR_PTR(-ret);
 }
 
 void bch2_ec_stop_dev(struct bch_fs *c, struct bch_dev *ca)
@@ -1575,7 +1604,7 @@ int bch2_stripes_write(struct bch_fs *c, unsigned flags)
 
 	bch2_trans_init(&trans, c, 0, 0);
 
-	iter = bch2_trans_get_iter(&trans, BTREE_ID_EC, POS_MIN,
+	iter = bch2_trans_get_iter(&trans, BTREE_ID_stripes, POS_MIN,
 				   BTREE_ITER_SLOTS|BTREE_ITER_INTENT);
 
 	genradix_for_each(&c->stripes[0], giter, m) {
@@ -1616,7 +1645,7 @@ static int bch2_stripes_read_fn(struct bch_fs *c, enum btree_id id,
 
 int bch2_stripes_read(struct bch_fs *c, struct journal_keys *journal_keys)
 {
-	int ret = bch2_btree_and_journal_walk(c, journal_keys, BTREE_ID_EC,
+	int ret = bch2_btree_and_journal_walk(c, journal_keys, BTREE_ID_stripes,
 					  NULL, bch2_stripes_read_fn);
 	if (ret)
 		bch_err(c, "error reading stripes: %i", ret);
@@ -1634,7 +1663,7 @@ int bch2_ec_mem_alloc(struct bch_fs *c, bool gc)
 
 	bch2_trans_init(&trans, c, 0, 0);
 
-	iter = bch2_trans_get_iter(&trans, BTREE_ID_EC, POS(0, U64_MAX), 0);
+	iter = bch2_trans_get_iter(&trans, BTREE_ID_stripes, POS(0, U64_MAX), 0);
 
 	k = bch2_btree_iter_prev(iter);
 	if (!IS_ERR_OR_NULL(k.k))
