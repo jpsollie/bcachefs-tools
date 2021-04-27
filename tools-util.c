@@ -663,3 +663,22 @@ int dev_mounted(char *dev)
 		return 1;
 	return 2;
 }
+
+struct bpos bpos_parse(char *buf)
+{
+	char *s = buf, *field;
+	u64 inode_v = 0, offset_v = 0;
+
+	if (!(field = strsep(&s, ":")) ||
+	    kstrtoull(field, 10, &inode_v))
+		die("invalid bpos %s", buf);
+
+	if ((field = strsep(&s, ":")) &&
+	    kstrtoull(field, 10, &offset_v))
+		die("invalid bpos %s", buf);
+
+	if (s)
+		die("invalid bpos %s", buf);
+
+	return (struct bpos) { .inode = inode_v, .offset = offset_v };
+}

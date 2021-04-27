@@ -1,6 +1,7 @@
 #ifndef _LINUX_JIFFIES_H
 #define _LINUX_JIFFIES_H
 
+#include <time.h>
 #include <linux/kernel.h>
 #include <linux/time64.h>
 #include <linux/typecheck.h>

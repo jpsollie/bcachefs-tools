@@ -13,4 +13,32 @@
 
 #define RCU_INIT_POINTER(p, v)		WRITE_ONCE(p, v)
 
+/* Has the specified rcu_head structure been handed to call_rcu()? */
+
+/**
+ * rcu_head_init - Initialize rcu_head for rcu_head_after_call_rcu()
+ * @rhp: The rcu_head structure to initialize.
+ *
+ * If you intend to invoke rcu_head_after_call_rcu() to test whether a
+ * given rcu_head structure has already been passed to call_rcu(), then
+ * you must also invoke this rcu_head_init() function on it just after
+ * allocating that structure.  Calls to this function must not race with
+ * calls to call_rcu(), rcu_head_after_call_rcu(), or callback invocation.
+ */
+static inline void rcu_head_init(struct rcu_head *rhp)
+{
+	rhp->func = (void *)~0L;
+}
+
+static inline bool
+rcu_head_after_call_rcu(struct rcu_head *rhp,
+			void (*f)(struct rcu_head *head))
+{
+	void (*func)(struct rcu_head *head) = READ_ONCE(rhp->func);
+
+	if (func == f)
+		return true;
+	return false;
+}
+
 #endif /* __TOOLS_LINUX_RCUPDATE_H */

@@ -11,6 +11,8 @@
 #define __SANE_USERSPACE_TYPES__	/* For PPC64, to get LL64 types */
 #include <asm/types.h>
 
+#include <linux/cache.h>
+
 #define BITS_PER_LONG	__BITS_PER_LONG
 
 struct page;
@@ -73,5 +75,7 @@ typedef __u64 __bitwise __be64;
 #endif
 
 typedef u64 sector_t;
+
+typedef int (*cmp_func_t)(const void *a, const void *b);
 
 #endif /* _TOOLS_LINUX_TYPES_H_ */

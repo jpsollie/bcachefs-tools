@@ -31,6 +31,7 @@ int cmd_device_resize(int argc, char *argv[]);
 int cmd_device_resize_journal(int argc, char *argv[]);
 
 int cmd_data_rereplicate(int argc, char *argv[]);
+int cmd_data_job(int argc, char *argv[]);
 
 int cmd_unlock(int argc, char *argv[]);
 int cmd_set_passphrase(int argc, char *argv[]);

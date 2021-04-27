@@ -12,6 +12,8 @@
 
 /* option parsing */
 
+#define SUPERBLOCK_SIZE_DEFAULT		2048	/* 1 MB */
+
 struct bch_opt_strs {
 union {
 	char			*by_id[bch2_opts_nr];
@@ -23,6 +25,7 @@ struct {
 };
 };
 
+void bch2_opt_strs_free(struct bch_opt_strs *);
 struct bch_opt_strs bch2_cmdline_opts_get(int *, char *[], unsigned);
 struct bch_opts bch2_parse_opts(struct bch_opt_strs);
 void bch2_opts_usage(unsigned);
@@ -30,9 +33,9 @@ void bch2_opts_usage(unsigned);
 struct format_opts {
 	char		*label;
 	uuid_le		uuid;
-
+	unsigned	version;
+	unsigned	superblock_size;
 	unsigned	encoded_extent_max;
-
 	bool		encrypted;
 	char		*passphrase;
 };
@@ -40,6 +43,8 @@ struct format_opts {
 static inline struct format_opts format_opts_default()
 {
 	return (struct format_opts) {
+		.version		= bcachefs_metadata_version_current,
+		.superblock_size	= SUPERBLOCK_SIZE_DEFAULT,
 		.encoded_extent_max	= 128,
 	};
 }
@@ -90,7 +95,8 @@ struct bchfs_handle {
 
 void bcache_fs_close(struct bchfs_handle);
 struct bchfs_handle bcache_fs_open(const char *);
-struct bchfs_handle bchu_fs_open_by_dev(const char *, unsigned *);
+struct bchfs_handle bchu_fs_open_by_dev(const char *, int *);
+int bchu_dev_path_to_idx(struct bchfs_handle, const char *);
 
 static inline void bchu_disk_add(struct bchfs_handle fs, char *dev)
 {

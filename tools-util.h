@@ -172,4 +172,6 @@ do {									\
 	_ret;								\
 })
 
+struct bpos bpos_parse(char *);
+
 #endif /* _TOOLS_UTIL_H */

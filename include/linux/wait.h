@@ -90,6 +90,7 @@ do {									\
 	__wait_event(wq, condition);					\
 } while (0)
 
+#define wait_event_freezable(wq, condition)	({wait_event(wq, condition); 0; })
 #define wait_event_killable(wq, condition)	({wait_event(wq, condition); 0; })
 #define wait_event_interruptible(wq, condition)	({wait_event(wq, condition); 0; })
 

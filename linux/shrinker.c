@@ -28,7 +28,6 @@ void unregister_shrinker(struct shrinker *shrinker)
 struct meminfo {
 	u64		total;
 	u64		available;
-
 };
 
 static u64 parse_meminfo_line(const char *line)
@@ -50,7 +49,7 @@ static struct meminfo read_meminfo(void)
 
 	f = fopen("/proc/meminfo", "r");
 	if (!f)
-		die("error opening /proc/meminfo: %m");
+		return ret;
 
 	while ((len = getline(&line, &n, f)) != -1) {
 		if ((v = strcmp_prefix(line, "MemTotal:")))
@@ -77,10 +76,18 @@ void run_shrinkers(void)
 		return;
 
 	info = read_meminfo();
-	want_shrink = (info.total >> 2) - info.available;
 
-	if (want_shrink <= 0)
-		return;
+	if (info.total && info.available) {
+		want_shrink = (info.total >> 2) - info.available;
+
+		if (want_shrink <= 0)
+			return;
+	} else {
+		/* If we weren't able to read /proc/meminfo, we must be pretty
+		 * low: */
+
+		want_shrink = 8 << 20;
+	}
 
 	mutex_lock(&shrinker_lock);
 	list_for_each_entry(shrinker, &shrinker_list, list) {

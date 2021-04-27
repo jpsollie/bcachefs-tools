@@ -40,7 +40,7 @@ static inline void *krealloc(void *old, size_t size, gfp_t flags)
 
 	run_shrinkers();
 
-	new = malloc(size);
+	new = kmalloc(size, flags);
 	if (!new)
 		return NULL;
 
@@ -66,6 +66,7 @@ static inline void *krealloc(void *old, size_t size, gfp_t flags)
 #define kzfree(p)			free(p)
 
 #define kvmalloc(size, flags)		kmalloc(size, flags)
+#define kvzalloc(size, flags)		kzalloc(size, flags)
 #define kvfree(p)			kfree(p)
 
 static inline struct page *alloc_pages(gfp_t flags, unsigned int order)

@@ -45,6 +45,7 @@ static inline type get_random_##type(void)		\
 
 get_random_type(int);
 get_random_type(long);
+get_random_type(u32);
 get_random_type(u64);
 
 #endif /* _LINUX_RANDOM_H */

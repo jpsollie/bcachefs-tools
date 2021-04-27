@@ -43,6 +43,7 @@ struct journal_buf {
 
 struct journal_entry_pin_list {
 	struct list_head		list;
+	struct list_head		key_cache_list;
 	struct list_head		flushed;
 	atomic_t			count;
 	struct bch_devs_list		devs;
@@ -50,7 +51,7 @@ struct journal_entry_pin_list {
 
 struct journal;
 struct journal_entry_pin;
-typedef void (*journal_pin_flush_fn)(struct journal *j,
+typedef int (*journal_pin_flush_fn)(struct journal *j,
 				struct journal_entry_pin *, u64);
 
 struct journal_entry_pin {
@@ -105,8 +106,9 @@ union journal_preres_state {
 	};
 
 	struct {
-		u32		reserved;
-		u32		remaining;
+		u64		waiting:1,
+				reserved:31,
+				remaining:32;
 	};
 };
 
@@ -243,6 +245,7 @@ struct journal {
 	spinlock_t		err_lock;
 
 	struct mutex		reclaim_lock;
+	wait_queue_head_t	reclaim_wait;
 	struct task_struct	*reclaim_thread;
 	bool			reclaim_kicked;
 	u64			nr_direct_reclaim;
@@ -250,6 +253,7 @@ struct journal {
 
 	unsigned long		last_flushed;
 	struct journal_entry_pin *flush_in_progress;
+	bool			flush_in_progress_dropped;
 	wait_queue_head_t	pin_flush_wait;
 
 	/* protects advancing ja->discard_idx: */

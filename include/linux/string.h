@@ -11,5 +11,6 @@ extern void memzero_explicit(void *, size_t);
 int match_string(const char * const *, size_t, const char *);
 
 #define kstrndup(s, n, gfp)		strndup(s, n)
+#define kstrdup(s, gfp)			strdup(s)
 
 #endif /* _LINUX_STRING_H_ */

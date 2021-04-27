@@ -10,6 +10,7 @@
 
 extern const char * const bch2_error_actions[];
 extern const char * const bch2_sb_features[];
+extern const char * const bch2_sb_compat[];
 extern const char * const bch2_btree_ids[];
 extern const char * const bch2_csum_opts[];
 extern const char * const bch2_compression_opts[];
@@ -212,11 +213,6 @@ enum opt_type {
 	  OPT_BOOL(),							\
 	  BCH_SB_PRJQUOTA,		false,				\
 	  NULL,		"Enable project quotas")			\
-	x(reflink,			u8,				\
-	  OPT_FORMAT|OPT_MOUNT|OPT_RUNTIME,				\
-	  OPT_BOOL(),							\
-	  BCH_SB_REFLINK,		true,				\
-	  NULL,		"Enable reflink support")			\
 	x(degraded,			u8,				\
 	  OPT_MOUNT,							\
 	  OPT_BOOL(),							\

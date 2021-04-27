@@ -307,7 +307,7 @@ struct btree_iter *bch2_inode_peek(struct btree_trans *trans,
 	if (ret)
 		goto err;
 
-	ret = k.k->type == KEY_TYPE_inode ? 0 : -EIO;
+	ret = k.k->type == KEY_TYPE_inode ? 0 : -ENOENT;
 	if (ret)
 		goto err;
 
@@ -332,6 +332,7 @@ int bch2_inode_write(struct btree_trans *trans,
 		return PTR_ERR(inode_p);
 
 	bch2_inode_pack(trans->c, inode_p, inode);
+	inode_p->inode.k.p.snapshot = iter->snapshot;
 	bch2_trans_update(trans, iter, &inode_p->inode.k_i, 0);
 	return 0;
 }
@@ -469,14 +470,14 @@ static inline u32 bkey_generation(struct bkey_s_c k)
 	}
 }
 
-int bch2_inode_create(struct btree_trans *trans,
-		      struct bch_inode_unpacked *inode_u)
+struct btree_iter *bch2_inode_create(struct btree_trans *trans,
+				     struct bch_inode_unpacked *inode_u,
+				     u32 snapshot)
 {
 	struct bch_fs *c = trans->c;
-	struct bkey_inode_buf *inode_p;
 	struct btree_iter *iter = NULL;
 	struct bkey_s_c k;
-	u64 min, max, start, *hint;
+	u64 min, max, start, pos, *hint;
 	int ret;
 
 	u64 cpu = raw_smp_processor_id();
@@ -494,60 +495,84 @@ int bch2_inode_create(struct btree_trans *trans,
 	if (start >= max || start < min)
 		start = min;
 
-	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
-	if (IS_ERR(inode_p))
-		return PTR_ERR(inode_p);
+	pos = start;
+	iter = bch2_trans_get_iter(trans, BTREE_ID_inodes, POS(0, pos),
+				   BTREE_ITER_ALL_SNAPSHOTS|
+				   BTREE_ITER_INTENT);
 again:
-	for_each_btree_key(trans, iter, BTREE_ID_inodes, POS(0, start),
-			   BTREE_ITER_SLOTS|BTREE_ITER_INTENT, k, ret) {
-		if (bkey_cmp(iter->pos, POS(0, max)) > 0)
-			break;
+	while ((k = bch2_btree_iter_peek(iter)).k &&
+	       !(ret = bkey_err(k)) &&
+	       bkey_cmp(k.k->p, POS(0, max)) < 0) {
+		while (pos < iter->pos.offset) {
+			if (!bch2_btree_key_cache_find(c, BTREE_ID_inodes, POS(0, pos)))
+				goto found_slot;
+
+			pos++;
+		}
+
+		if (k.k->p.snapshot == snapshot &&
+		    k.k->type != KEY_TYPE_inode &&
+		    !bch2_btree_key_cache_find(c, BTREE_ID_inodes, SPOS(0, pos, snapshot))) {
+			bch2_btree_iter_next(iter);
+			continue;
+		}
 
 		/*
-		 * There's a potential cache coherency issue with the btree key
-		 * cache code here - we're iterating over the btree, skipping
-		 * that cache. We should never see an empty slot that isn't
-		 * actually empty due to a pending update in the key cache
-		 * because the update that creates the inode isn't done with a
-		 * cached iterator, but - better safe than sorry, check the
-		 * cache before using a slot:
+		 * We don't need to iterate over keys in every snapshot once
+		 * we've found just one:
 		 */
-		if (k.k->type != KEY_TYPE_inode &&
-		    !bch2_btree_key_cache_find(c, BTREE_ID_inodes, iter->pos))
+		pos = iter->pos.offset + 1;
+		bch2_btree_iter_set_pos(iter, POS(0, pos));
+	}
+
+	while (!ret && pos < max) {
+		if (!bch2_btree_key_cache_find(c, BTREE_ID_inodes, POS(0, pos)))
 			goto found_slot;
+
+		pos++;
 	}
 
-	bch2_trans_iter_put(trans, iter);
+	if (!ret && start == min)
+		ret = -ENOSPC;
 
-	if (ret)
-		return ret;
-
-	if (start != min) {
-		/* Retry from start */
-		start = min;
-		goto again;
+	if (ret) {
+		bch2_trans_iter_put(trans, iter);
+		return ERR_PTR(ret);
 	}
 
-	return -ENOSPC;
+	/* Retry from start */
+	pos = start = min;
+	bch2_btree_iter_set_pos(iter, POS(0, pos));
+	goto again;
 found_slot:
+	bch2_btree_iter_set_pos(iter, SPOS(0, pos, snapshot));
+	k = bch2_btree_iter_peek_slot(iter);
+	ret = bkey_err(k);
+	if (ret) {
+		bch2_trans_iter_put(trans, iter);
+		return ERR_PTR(ret);
+	}
+
+	/* We may have raced while the iterator wasn't pointing at pos: */
+	if (k.k->type == KEY_TYPE_inode ||
+	    bch2_btree_key_cache_find(c, BTREE_ID_inodes, k.k->p))
+		goto again;
+
 	*hint			= k.k->p.offset;
 	inode_u->bi_inum	= k.k->p.offset;
 	inode_u->bi_generation	= bkey_generation(k);
-
-	ret = bch2_inode_write(trans, iter, inode_u);
-	bch2_trans_iter_put(trans, iter);
-	return ret;
+	return iter;
 }
 
 int bch2_inode_rm(struct bch_fs *c, u64 inode_nr, bool cached)
 {
 	struct btree_trans trans;
-	struct btree_iter *iter;
+	struct btree_iter *iter = NULL;
 	struct bkey_i_inode_generation delete;
 	struct bpos start = POS(inode_nr, 0);
 	struct bpos end = POS(inode_nr + 1, 0);
+	struct bch_inode_unpacked inode_u;
 	struct bkey_s_c k;
-	u64 bi_generation;
 	int ret;
 
 	bch2_trans_init(&trans, c, 0, 0);
@@ -571,8 +596,6 @@ int bch2_inode_rm(struct bch_fs *c, u64 inode_nr, bool cached)
 retry:
 	bch2_trans_begin(&trans);
 
-	bi_generation = 0;
-
 	if (cached) {
 		iter = bch2_trans_get_iter(&trans, BTREE_ID_inodes, POS(0, inode_nr),
 					   BTREE_ITER_CACHED|BTREE_ITER_INTENT);
@@ -587,40 +610,26 @@ retry:
 	if (ret)
 		goto err;
 
-	bch2_fs_inconsistent_on(k.k->type != KEY_TYPE_inode, trans.c,
-				"inode %llu not found when deleting",
-				inode_nr);
-
-	switch (k.k->type) {
-	case KEY_TYPE_inode: {
-		struct bch_inode_unpacked inode_u;
-
-		if (!bch2_inode_unpack(bkey_s_c_to_inode(k), &inode_u))
-			bi_generation = inode_u.bi_generation + 1;
-		break;
-	}
-	case KEY_TYPE_inode_generation: {
-		struct bkey_s_c_inode_generation g =
-			bkey_s_c_to_inode_generation(k);
-		bi_generation = le32_to_cpu(g.v->bi_generation);
-		break;
-	}
+	if (k.k->type != KEY_TYPE_inode) {
+		bch2_fs_inconsistent(trans.c,
+				     "inode %llu not found when deleting",
+				     inode_nr);
+		ret = -EIO;
+		goto err;
 	}
 
-	if (!bi_generation) {
-		bkey_init(&delete.k);
-		delete.k.p.offset = inode_nr;
-	} else {
-		bkey_inode_generation_init(&delete.k_i);
-		delete.k.p.offset = inode_nr;
-		delete.v.bi_generation = cpu_to_le32(bi_generation);
-	}
+	bch2_inode_unpack(bkey_s_c_to_inode(k), &inode_u);
+
+	bkey_inode_generation_init(&delete.k_i);
+	delete.k.p = iter->pos;
+	delete.v.bi_generation = cpu_to_le32(inode_u.bi_generation + 1);
 
 	bch2_trans_update(&trans, iter, &delete.k_i, 0);
 
 	ret = bch2_trans_commit(&trans, NULL, NULL,
 				BTREE_INSERT_NOFAIL);
 err:
+	bch2_trans_iter_put(&trans, iter);
 	if (ret == -EINTR)
 		goto retry;
 
@@ -628,24 +637,14 @@ err:
 	return ret;
 }
 
-int bch2_inode_find_by_inum_trans(struct btree_trans *trans, u64 inode_nr,
-				  struct bch_inode_unpacked *inode)
+static int bch2_inode_find_by_inum_trans(struct btree_trans *trans, u64 inode_nr,
+					 struct bch_inode_unpacked *inode)
 {
 	struct btree_iter *iter;
-	struct bkey_s_c k;
 	int ret;
 
-	iter = bch2_trans_get_iter(trans, BTREE_ID_inodes,
-			POS(0, inode_nr), BTREE_ITER_CACHED);
-	k = bch2_btree_iter_peek_cached(iter);
-	ret = bkey_err(k);
-	if (ret)
-		goto err;
-
-	ret = k.k->type == KEY_TYPE_inode
-		? bch2_inode_unpack(bkey_s_c_to_inode(k), inode)
-		: -ENOENT;
-err:
+	iter = bch2_inode_peek(trans, inode, inode_nr, 0);
+	ret = PTR_ERR_OR_ZERO(iter);
 	bch2_trans_iter_put(trans, iter);
 	return ret;
 }

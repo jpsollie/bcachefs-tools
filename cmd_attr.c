@@ -108,6 +108,7 @@ int cmd_setattr(int argc, char *argv[])
 
 	for (i = 1; i < argc; i++)
 		do_setattr(argv[i], opts);
+	bch2_opt_strs_free(&opts);
 
 	return 0;
 }

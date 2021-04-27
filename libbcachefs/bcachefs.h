@@ -259,7 +259,11 @@ do {									\
 	BCH_DEBUG_PARAM(btree_gc_rewrite_disabled,			\
 		"Disables rewriting of btree nodes during mark and sweep")\
 	BCH_DEBUG_PARAM(btree_shrinker_disabled,			\
-		"Disables the shrinker callback for the btree node cache")
+		"Disables the shrinker callback for the btree node cache")\
+	BCH_DEBUG_PARAM(verify_btree_ondisk,				\
+		"Reread btree nodes at various points to verify the "	\
+		"mergesort in the read path against modifications "	\
+		"done in memory")
 
 /* Parameters that should only be compiled in in debug mode: */
 #define BCH_DEBUG_PARAMS_DEBUG()					\
@@ -273,10 +277,6 @@ do {									\
 		"information) when iterating over keys")		\
 	BCH_DEBUG_PARAM(debug_check_btree_accounting,			\
 		"Verify btree accounting for keys within a node")	\
-	BCH_DEBUG_PARAM(verify_btree_ondisk,				\
-		"Reread btree nodes at various points to verify the "	\
-		"mergesort in the read path against modifications "	\
-		"done in memory")					\
 	BCH_DEBUG_PARAM(journal_seq_verify,				\
 		"Store the journal sequence number in the version "	\
 		"number of every btree key, and verify that btree "	\
@@ -379,7 +379,6 @@ enum gc_phase {
 	GC_PHASE_BTREE_reflink,
 
 	GC_PHASE_PENDING_DELETE,
-	GC_PHASE_ALLOC,
 };
 
 struct gc_pos {
@@ -447,6 +446,7 @@ struct bch_dev {
 	 */
 	alloc_fifo		free[RESERVE_NR];
 	alloc_fifo		free_inc;
+	unsigned		nr_open_buckets;
 
 	open_bucket_idx_t	open_buckets_partial[OPEN_BUCKETS_COUNT];
 	open_bucket_idx_t	open_buckets_partial_nr;
@@ -456,16 +456,7 @@ struct bch_dev {
 	size_t			inc_gen_needs_gc;
 	size_t			inc_gen_really_needs_gc;
 
-	/*
-	 * XXX: this should be an enum for allocator state, so as to include
-	 * error state
-	 */
-	enum {
-		ALLOCATOR_STOPPED,
-		ALLOCATOR_RUNNING,
-		ALLOCATOR_BLOCKED,
-		ALLOCATOR_BLOCKED_FULL,
-	}			allocator_state;
+	enum allocator_states	allocator_state;
 
 	alloc_heap		alloc_heap;
 
@@ -494,10 +485,12 @@ enum {
 	BCH_FS_ALLOCATOR_RUNNING,
 	BCH_FS_ALLOCATOR_STOPPING,
 	BCH_FS_INITIAL_GC_DONE,
+	BCH_FS_INITIAL_GC_UNFIXED,
 	BCH_FS_BTREE_INTERIOR_REPLAY_DONE,
 	BCH_FS_FSCK_DONE,
 	BCH_FS_STARTED,
 	BCH_FS_RW,
+	BCH_FS_WAS_RW,
 
 	/* shutdown: */
 	BCH_FS_STOPPING,
@@ -506,7 +499,9 @@ enum {
 
 	/* errors: */
 	BCH_FS_ERROR,
+	BCH_FS_TOPOLOGY_ERROR,
 	BCH_FS_ERRORS_FIXED,
+	BCH_FS_ERRORS_NOT_FIXED,
 
 	/* misc: */
 	BCH_FS_NEED_ANOTHER_GC,
@@ -554,6 +549,8 @@ struct btree_iter_buf {
 	struct btree_iter	*iter;
 };
 
+#define REPLICAS_DELTA_LIST_MAX	(1U << 16)
+
 struct bch_fs {
 	struct closure		cl;
 
@@ -581,6 +578,7 @@ struct bch_fs {
 	struct bch_replicas_cpu replicas;
 	struct bch_replicas_cpu replicas_gc;
 	struct mutex		replicas_gc_lock;
+	mempool_t		replicas_delta_pool;
 
 	struct journal_entry_res btree_root_journal_res;
 	struct journal_entry_res replicas_journal_res;
@@ -597,6 +595,7 @@ struct bch_fs {
 		uuid_le		user_uuid;
 
 		u16		version;
+		u16		version_min;
 		u16		encoded_extent_max;
 
 		u8		nr_devices;
@@ -652,6 +651,7 @@ struct bch_fs {
 	struct mutex		btree_trans_lock;
 	struct list_head	btree_trans_list;
 	mempool_t		btree_iters_pool;
+	mempool_t		btree_trans_mem_pool;
 	struct btree_iter_buf  __percpu	*btree_iters_bufs;
 
 	struct srcu_struct	btree_trans_barrier;
@@ -663,9 +663,6 @@ struct bch_fs {
 	struct workqueue_struct	*copygc_wq;
 
 	/* ALLOCATION */
-	struct delayed_work	pd_controllers_update;
-	unsigned		pd_controllers_update_seconds;
-
 	struct bch_devs_mask	rw_devs[BCH_DATA_NR];
 
 	u64			capacity; /* sectors */
@@ -689,10 +686,11 @@ struct bch_fs {
 	struct bch_fs_usage		*usage_base;
 	struct bch_fs_usage __percpu	*usage[JOURNAL_BUF_NR];
 	struct bch_fs_usage __percpu	*usage_gc;
+	u64 __percpu		*online_reserved;
 
 	/* single element mempool: */
 	struct mutex		usage_scratch_lock;
-	struct bch_fs_usage	*usage_scratch;
+	struct bch_fs_usage_online *usage_scratch;
 
 	struct io_clock		io_clock[2];
 
@@ -723,6 +721,9 @@ struct bch_fs {
 	struct task_struct	*gc_thread;
 	atomic_t		kick_gc;
 	unsigned long		gc_count;
+
+	enum btree_id		gc_gens_btree;
+	struct bpos		gc_gens_pos;
 
 	/*
 	 * Tracks GC's progress - everything in the range [ZERO_KEY..gc_cur_pos]
@@ -770,9 +771,8 @@ struct bch_fs {
 	/* COPYGC */
 	struct task_struct	*copygc_thread;
 	copygc_heap		copygc_heap;
-	struct bch_pd_controller copygc_pd;
 	struct write_point	copygc_write_point;
-	u64			copygc_threshold;
+	s64			copygc_wait;
 
 	/* STRIPES: */
 	GENRADIX(struct stripe) stripes[2];
@@ -803,6 +803,9 @@ struct bch_fs {
 	struct bio_set		dio_write_bioset;
 	struct bio_set		dio_read_bioset;
 
+
+	atomic64_t		btree_writes_nr;
+	atomic64_t		btree_writes_sectors;
 	struct bio_list		btree_write_error_list;
 	struct work_struct	btree_write_error_work;
 	spinlock_t		btree_write_error_lock;
@@ -818,11 +821,9 @@ struct bch_fs {
 	/* DEBUG JUNK */
 	struct dentry		*debug;
 	struct btree_debug	btree_debug[BTREE_ID_NR];
-#ifdef CONFIG_BCACHEFS_DEBUG
 	struct btree		*verify_data;
 	struct btree_node	*verify_ondisk;
 	struct mutex		verify_lock;
-#endif
 
 	u64			*unused_inode_hints;
 	unsigned		inode_shard_bits;

@@ -21,6 +21,11 @@ const char * const bch2_sb_features[] = {
 	NULL
 };
 
+const char * const bch2_sb_compat[] = {
+	BCH_SB_COMPAT()
+	NULL
+};
+
 const char * const bch2_btree_ids[] = {
 	BCH_BTREE_IDS()
 	NULL

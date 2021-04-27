@@ -286,7 +286,6 @@ void bch2_fs_read_only(struct bch_fs *c)
 	percpu_ref_kill(&c->writes);
 
 	cancel_work_sync(&c->ec_stripe_delete_work);
-	cancel_delayed_work(&c->pd_controllers_update);
 
 	/*
 	 * If we're not doing an emergency shutdown, we want to wait on
@@ -371,8 +370,6 @@ static int bch2_fs_read_write_late(struct bch_fs *c)
 		return ret;
 	}
 
-	schedule_delayed_work(&c->pd_controllers_update, 5 * HZ);
-
 	schedule_work(&c->ec_stripe_delete_work);
 
 	return 0;
@@ -383,6 +380,11 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	struct bch_dev *ca;
 	unsigned i;
 	int ret;
+
+	if (test_bit(BCH_FS_INITIAL_GC_UNFIXED, &c->flags)) {
+		bch_err(c, "cannot go rw, unfixed btree errors");
+		return -EROFS;
+	}
 
 	if (test_bit(BCH_FS_RW, &c->flags))
 		return 0;
@@ -395,6 +397,8 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	    (c->opts.nochanges &&
 	     (!early || c->opts.read_only)))
 		return -EROFS;
+
+	bch_info(c, "going read-write");
 
 	ret = bch2_fs_mark_dirty(c);
 	if (ret)
@@ -424,6 +428,9 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	set_bit(BCH_FS_ALLOCATOR_RUNNING, &c->flags);
 
+	for_each_rw_member(ca, c, i)
+		bch2_wake_allocator(ca);
+
 	ret = bch2_journal_reclaim_start(&c->journal);
 	if (ret) {
 		bch_err(c, "error starting journal reclaim: %i", ret);
@@ -438,6 +445,7 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 
 	percpu_ref_reinit(&c->writes);
 	set_bit(BCH_FS_RW, &c->flags);
+	set_bit(BCH_FS_WAS_RW, &c->flags);
 	return 0;
 err:
 	__bch2_fs_read_only(c);
@@ -475,6 +483,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_fs_btree_iter_exit(c);
 	bch2_fs_btree_key_cache_exit(&c->btree_key_cache);
 	bch2_fs_btree_cache_exit(c);
+	bch2_fs_replicas_exit(c);
 	bch2_fs_journal_exit(&c->journal);
 	bch2_io_clock_exit(&c->io_clock[WRITE]);
 	bch2_io_clock_exit(&c->io_clock[READ]);
@@ -482,15 +491,12 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bch2_journal_keys_free(&c->journal_keys);
 	bch2_journal_entries_free(&c->journal_entries);
 	percpu_free_rwsem(&c->mark_lock);
-	kfree(c->usage_scratch);
-	for (i = 0; i < ARRAY_SIZE(c->usage); i++)
-		free_percpu(c->usage[i]);
-	kfree(c->usage_base);
 
 	if (c->btree_iters_bufs)
 		for_each_possible_cpu(cpu)
 			kfree(per_cpu_ptr(c->btree_iters_bufs, cpu)->iter);
 
+	free_percpu(c->online_reserved);
 	free_percpu(c->btree_iters_bufs);
 	free_percpu(c->pcpu);
 	mempool_exit(&c->large_bkey_pool);
@@ -498,8 +504,6 @@ static void __bch2_fs_free(struct bch_fs *c)
 	bioset_exit(&c->btree_bio);
 	mempool_exit(&c->fill_iter);
 	percpu_ref_exit(&c->writes);
-	kfree(c->replicas.entries);
-	kfree(c->replicas_gc.entries);
 	kfree(rcu_dereference_protected(c->disk_groups, 1));
 	kfree(c->journal_seq_blacklist_table);
 	kfree(c->unused_inode_hints);
@@ -510,8 +514,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	if (c->wq)
 		destroy_workqueue(c->wq);
 
-	free_pages((unsigned long) c->disk_sb.sb,
-		   c->disk_sb.page_order);
+	bch2_free_super(&c->disk_sb);
 	kvpfree(c, sizeof(*c));
 	module_put(THIS_MODULE);
 }
@@ -561,7 +564,6 @@ void __bch2_fs_stop(struct bch_fs *c)
 		cancel_work_sync(&ca->io_error_work);
 
 	cancel_work_sync(&c->btree_write_error_work);
-	cancel_delayed_work_sync(&c->pd_controllers_update);
 	cancel_work_sync(&c->read_only_work);
 
 	for (i = 0; i < c->sb.nr_devices; i++)
@@ -770,6 +772,7 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 			BIOSET_NEED_BVECS) ||
 	    !(c->pcpu = alloc_percpu(struct bch_fs_pcpu)) ||
 	    !(c->btree_iters_bufs = alloc_percpu(struct btree_iter_buf)) ||
+	    !(c->online_reserved = alloc_percpu(u64)) ||
 	    mempool_init_kvpmalloc_pool(&c->btree_bounce_pool, 1,
 					btree_bytes(c)) ||
 	    mempool_init_kmalloc_pool(&c->large_bkey_pool, 1, 2048) ||
@@ -902,9 +905,16 @@ int bch2_fs_start(struct bch_fs *c)
 	/*
 	 * Allocator threads don't start filling copygc reserve until after we
 	 * set BCH_FS_STARTED - wake them now:
+	 *
+	 * XXX ugly hack:
+	 * Need to set ca->allocator_state here instead of relying on the
+	 * allocator threads to do it to avoid racing with the copygc threads
+	 * checking it and thinking they have no alloc reserve:
 	 */
-	for_each_online_member(ca, c, i)
+	for_each_online_member(ca, c, i) {
+		ca->allocator_state = ALLOCATOR_running;
 		bch2_wake_allocator(ca);
+	}
 
 	if (c->opts.read_only || c->opts.nochanges) {
 		bch2_fs_read_only(c);
@@ -1001,6 +1011,8 @@ static void bch2_dev_release(struct kobject *kobj)
 
 static void bch2_dev_free(struct bch_dev *ca)
 {
+	bch2_dev_allocator_stop(ca);
+
 	cancel_work_sync(&ca->io_error_work);
 
 	if (ca->kobj.state_in_sysfs &&
@@ -1168,6 +1180,14 @@ static int bch2_dev_alloc(struct bch_fs *c, unsigned dev_idx)
 	ca = __bch2_dev_alloc(c, member);
 	if (!ca)
 		goto err;
+
+	ca->fs = c;
+
+	if (ca->mi.state == BCH_MEMBER_STATE_rw &&
+	    bch2_dev_allocator_start(ca)) {
+		bch2_dev_free(ca);
+		goto err;
+	}
 
 	bch2_dev_attach(c, ca, dev_idx);
 out:
@@ -1663,7 +1683,7 @@ have_slot:
 	bch2_dev_usage_journal_reserve(c);
 
 	err = "error marking superblock";
-	ret = bch2_trans_mark_dev_sb(c, NULL, ca);
+	ret = bch2_trans_mark_dev_sb(c, ca);
 	if (ret)
 		goto err_late;
 
@@ -1723,7 +1743,7 @@ int bch2_dev_online(struct bch_fs *c, const char *path)
 
 	ca = bch_dev_locked(c, dev_idx);
 
-	if (bch2_trans_mark_dev_sb(c, NULL, ca)) {
+	if (bch2_trans_mark_dev_sb(c, ca)) {
 		err = "bch2_trans_mark_dev_sb() error";
 		goto err;
 	}

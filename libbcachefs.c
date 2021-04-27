@@ -35,52 +35,35 @@ static u64 min_size(unsigned bucket_size)
 	return BCH_MIN_NR_NBUCKETS * bucket_size;
 }
 
-static void init_layout(struct bch_sb_layout *l, unsigned block_size,
+static void init_layout(struct bch_sb_layout *l,
+			unsigned block_size,
+			unsigned sb_size,
 			u64 start, u64 end)
 {
-	unsigned sb_size;
-	u64 backup; /* offset of 2nd sb */
+	unsigned i;
 
 	memset(l, 0, sizeof(*l));
-
-	if (start != BCH_SB_SECTOR)
-		start = round_up(start, block_size);
-	end = round_down(end, block_size);
-
-	if (start >= end)
-		die("insufficient space for superblocks");
-
-	/*
-	 * Create two superblocks in the allowed range: reserve a maximum of 64k
-	 */
-	sb_size = min_t(u64, 128, end - start / 2);
-
-	backup = start + sb_size;
-	backup = round_up(backup, block_size);
-
-	backup = min(backup, end);
-
-	sb_size = min(end - backup, backup- start);
-	sb_size = rounddown_pow_of_two(sb_size);
-
-	if (sb_size < 8)
-		die("insufficient space for superblocks");
 
 	l->magic		= BCACHE_MAGIC;
 	l->layout_type		= 0;
 	l->nr_superblocks	= 2;
 	l->sb_max_size_bits	= ilog2(sb_size);
-	l->sb_offset[0]		= cpu_to_le64(start);
-	l->sb_offset[1]		= cpu_to_le64(backup);
+
+	/* Create two superblocks in the allowed range: */
+	for (i = 0; i < l->nr_superblocks; i++) {
+		if (start != BCH_SB_SECTOR)
+			start = round_up(start, block_size);
+
+		l->sb_offset[i] = cpu_to_le64(start);
+		start += sb_size;
+	}
+
+	if (start >= end)
+		die("insufficient space for superblocks");
 }
 
 void bch2_pick_bucket_size(struct bch_opts opts, struct dev_opts *dev)
 {
-	if (!dev->sb_offset) {
-		dev->sb_offset	= BCH_SB_SECTOR;
-		dev->sb_end	= BCH_SB_SECTOR + 256;
-	}
-
 	if (!dev->size)
 		dev->size = get_size(dev->path, dev->fd) >> 9;
 
@@ -202,12 +185,15 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	if (bch2_sb_realloc(&sb, 0))
 		die("insufficient memory");
 
-	sb.sb->version		= le16_to_cpu(bcachefs_metadata_version_current);
-	sb.sb->version_min	= le16_to_cpu(bcachefs_metadata_version_current);
+	sb.sb->version		= le16_to_cpu(opts.version);
+	sb.sb->version_min	= le16_to_cpu(opts.version);
 	sb.sb->magic		= BCACHE_MAGIC;
 	sb.sb->block_size	= cpu_to_le16(fs_opts.block_size);
 	sb.sb->user_uuid	= opts.uuid;
 	sb.sb->nr_devices	= nr_devs;
+
+	if (opts.version == bcachefs_metadata_version_current)
+		sb.sb->features[0] |= BCH_SB_FEATURES_ALL;
 
 	uuid_generate(sb.sb->uuid.b);
 
@@ -297,7 +283,13 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 	for (i = devs; i < devs + nr_devs; i++) {
 		sb.sb->dev_idx = i - devs;
 
+		if (!i->sb_offset) {
+			i->sb_offset	= BCH_SB_SECTOR;
+			i->sb_end	= i->size;
+		}
+
 		init_layout(&sb.sb->layout, fs_opts.block_size,
+			    opts.superblock_size,
 			    i->sb_offset, i->sb_end);
 
 		if (i->sb_offset == BCH_SB_SECTOR) {
@@ -677,6 +669,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	struct bch_sb_field_members *mi;
 	char user_uuid_str[40], internal_uuid_str[40];
 	char features_str[500];
+	char compat_features_str[500];
 	char fields_have_str[200];
 	char label[BCH_SB_LABEL_SIZE + 1];
 	char time_str[64];
@@ -730,6 +723,10 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 			   bch2_sb_features,
 			   le64_to_cpu(sb->features[0]));
 
+	bch2_flags_to_text(&PBUF(compat_features_str),
+			   bch2_sb_compat,
+			   le64_to_cpu(sb->compat[0]));
+
 	vstruct_for_each(sb, f)
 		fields_have |= 1 << le32_to_cpu(f->type);
 	bch2_flags_to_text(&PBUF(fields_have_str),
@@ -739,7 +736,8 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	       "Internal UUID:			%s\n"
 	       "Device index:			%u\n"
 	       "Label:				%s\n"
-	       "Version:			%llu\n"
+	       "Version:			%u\n"
+	       "Oldest version on disk:		%u\n"
 	       "Created:			%s\n"
 	       "Squence number:			%llu\n"
 	       "Block_size:			%s\n"
@@ -747,6 +745,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	       "Error action:			%s\n"
 	       "Clean:				%llu\n"
 	       "Features:			%s\n"
+	       "Compat features:		%s\n"
 
 	       "Metadata replicas:		%llu\n"
 	       "Data replicas:			%llu\n"
@@ -772,7 +771,8 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 	       internal_uuid_str,
 	       sb->dev_idx,
 	       label,
-	       le64_to_cpu(sb->version),
+	       le16_to_cpu(sb->version),
+	       le16_to_cpu(sb->version_min),
 	       time_str,
 	       le64_to_cpu(sb->seq),
 	       pr_units(le16_to_cpu(sb->block_size), units),
@@ -784,6 +784,7 @@ void bch2_sb_print(struct bch_sb *sb, bool print_layout,
 
 	       BCH_SB_CLEAN(sb),
 	       features_str,
+	       compat_features_str,
 
 	       BCH_SB_META_REPLICAS_WANT(sb),
 	       BCH_SB_DATA_REPLICAS_WANT(sb),
@@ -906,7 +907,7 @@ struct bchfs_handle bcache_fs_open(const char *path)
  * Given a path to a block device, open the filesystem it belongs to; also
  * return the device's idx:
  */
-struct bchfs_handle bchu_fs_open_by_dev(const char *path, unsigned *idx)
+struct bchfs_handle bchu_fs_open_by_dev(const char *path, int *idx)
 {
 	char buf[1024], *uuid_str;
 
@@ -948,6 +949,17 @@ struct bchfs_handle bchu_fs_open_by_dev(const char *path, unsigned *idx)
 	}
 
 	return bcache_fs_open(uuid_str);
+}
+
+int bchu_dev_path_to_idx(struct bchfs_handle fs, const char *dev_path)
+{
+	int idx;
+	struct bchfs_handle fs2 = bchu_fs_open_by_dev(dev_path, &idx);
+
+	if (memcmp(&fs.uuid, &fs2.uuid, sizeof(fs.uuid)))
+		idx = -1;
+	bcache_fs_close(fs2);
+	return idx;
 }
 
 int bchu_data(struct bchfs_handle fs, struct bch_ioctl_data cmd)
@@ -994,6 +1006,16 @@ int bchu_data(struct bchfs_handle fs, struct bch_ioctl_data cmd)
 
 /* option parsing */
 
+void bch2_opt_strs_free(struct bch_opt_strs *opts)
+{
+	unsigned i;
+
+	for (i = 0; i < bch2_opts_nr; i++) {
+		free(opts->by_id[i]);
+		opts->by_id[i] = NULL;
+	}
+}
+
 struct bch_opt_strs bch2_cmdline_opts_get(int *argc, char *argv[],
 					  unsigned opt_types)
 {
@@ -1026,9 +1048,8 @@ struct bch_opt_strs bch2_cmdline_opts_get(int *argc, char *argv[],
 		optid = bch2_opt_lookup(optstr);
 		if (optid < 0 ||
 		    !(bch2_opt_table[optid].mode & opt_types)) {
-			free(optstr);
 			i++;
-			continue;
+			goto next;
 		}
 
 		if (!valstr &&
@@ -1040,13 +1061,15 @@ struct bch_opt_strs bch2_cmdline_opts_get(int *argc, char *argv[],
 		if (!valstr)
 			valstr = "1";
 
-		opts.by_id[optid] = valstr;
+		opts.by_id[optid] = strdup(valstr);
 
 		*argc -= nr_args;
 		memmove(&argv[i],
 			&argv[i + nr_args],
 			sizeof(char *) * (*argc - i));
 		argv[*argc] = NULL;
+next:
+		free(optstr);
 	}
 
 	return opts;

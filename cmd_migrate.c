@@ -599,7 +599,9 @@ static void copy_fs(struct bch_fs *c, int src_fd, const char *src_path,
 	bch2_alloc_write(c, false);
 }
 
-static void find_superblock_space(ranges extents, struct dev_opts *dev)
+static void find_superblock_space(ranges extents,
+				  struct format_opts opts,
+				  struct dev_opts *dev)
 {
 	struct range *i;
 
@@ -609,9 +611,10 @@ static void find_superblock_space(ranges extents, struct dev_opts *dev)
 		u64 end = round_down(i->end,
 				     dev->bucket_size << 9);
 
-		if (start + (128 << 10) <= end) {
+		/* Need space for two superblocks: */
+		if (start + (opts.superblock_size << 9) * 2 <= end) {
 			dev->sb_offset	= start >> 9;
-			dev->sb_end	= dev->sb_offset + 256;
+			dev->sb_end	= dev->sb_offset + opts.superblock_size * 2;
 			return;
 		}
 	}
@@ -673,7 +676,7 @@ static int migrate_fs(const char		*fs_path,
 				get_size(dev.path, dev.fd) / 5,
 				&bcachefs_inum, stat.st_dev, force);
 
-	find_superblock_space(extents, &dev);
+	find_superblock_space(extents, format_opts, &dev);
 
 	struct bch_sb *sb = bch2_format(fs_opt_strs,
 					fs_opts,format_opts, &dev, 1);
@@ -770,10 +773,12 @@ int cmd_migrate(int argc, char *argv[])
 	if (format_opts.encrypted && !no_passphrase)
 		format_opts.passphrase = read_passphrase_twice("Enter passphrase: ");
 
-	return migrate_fs(fs_path,
-			  fs_opt_strs,
-			  fs_opts,
-			  format_opts, force);
+	int ret = migrate_fs(fs_path,
+			     fs_opt_strs,
+			     fs_opts,
+			     format_opts, force);
+	bch2_opt_strs_free(&fs_opt_strs);
+	return ret;
 }
 
 static void migrate_superblock_usage(void)

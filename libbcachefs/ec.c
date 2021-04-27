@@ -151,7 +151,8 @@ static int bkey_matches_stripe(struct bch_stripe *s,
 
 	bkey_for_each_ptr(ptrs, ptr)
 		for (i = 0; i < nr_data; i++)
-			if (__bch2_ptr_matches_stripe(s, ptr, i))
+			if (__bch2_ptr_matches_stripe(&s->ptrs[i], ptr,
+						      le16_to_cpu(s->sectors)))
 				return i;
 
 	return -1;
@@ -841,13 +842,13 @@ static int ec_stripe_update_ptrs(struct bch_fs *c,
 		struct bch_extent_ptr *ptr, *ec_ptr = NULL;
 
 		if (extent_has_stripe_ptr(k, s->key.k.p.offset)) {
-			bch2_btree_iter_next(iter);
+			bch2_btree_iter_advance(iter);
 			continue;
 		}
 
 		block = bkey_matches_stripe(&s->key.v, k);
 		if (block < 0) {
-			bch2_btree_iter_next(iter);
+			bch2_btree_iter_advance(iter);
 			continue;
 		}
 
@@ -872,6 +873,7 @@ static int ec_stripe_update_ptrs(struct bch_fs *c,
 		if (ret)
 			break;
 	}
+	bch2_trans_iter_put(&trans, iter);
 
 	bch2_trans_exit(&trans);
 	bch2_bkey_buf_exit(&sk, c);
@@ -1619,6 +1621,7 @@ int bch2_stripes_write(struct bch_fs *c, unsigned flags)
 		if (ret)
 			break;
 	}
+	bch2_trans_iter_put(&trans, iter);
 
 	bch2_trans_exit(&trans);
 
@@ -1662,12 +1665,13 @@ int bch2_ec_mem_alloc(struct bch_fs *c, bool gc)
 	int ret = 0;
 
 	bch2_trans_init(&trans, c, 0, 0);
-
 	iter = bch2_trans_get_iter(&trans, BTREE_ID_stripes, POS(0, U64_MAX), 0);
 
 	k = bch2_btree_iter_prev(iter);
 	if (!IS_ERR_OR_NULL(k.k))
 		idx = k.k->p.offset + 1;
+
+	bch2_trans_iter_put(&trans, iter);
 	ret = bch2_trans_exit(&trans);
 	if (ret)
 		return ret;

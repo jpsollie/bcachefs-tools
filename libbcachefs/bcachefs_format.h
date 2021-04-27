@@ -138,19 +138,18 @@ struct bpos {
 #define KEY_SNAPSHOT_MAX		((__u32)~0U)
 #define KEY_SIZE_MAX			((__u32)~0U)
 
-static inline struct bpos POS(__u64 inode, __u64 offset)
+static inline struct bpos SPOS(__u64 inode, __u64 offset, __u32 snapshot)
 {
-	struct bpos ret;
-
-	ret.inode	= inode;
-	ret.offset	= offset;
-	ret.snapshot	= 0;
-
-	return ret;
+	return (struct bpos) {
+		.inode		= inode,
+		.offset		= offset,
+		.snapshot	= snapshot,
+	};
 }
 
-#define POS_MIN				POS(0, 0)
-#define POS_MAX				POS(KEY_INODE_MAX, KEY_OFFSET_MAX)
+#define POS_MIN				SPOS(0, 0, 0)
+#define POS_MAX				SPOS(KEY_INODE_MAX, KEY_OFFSET_MAX, KEY_SNAPSHOT_MAX)
+#define POS(_inode, _offset)		SPOS(_inode, _offset, 0)
 
 /* Empty placeholder struct, for container_of() */
 struct bch_val {
@@ -707,7 +706,9 @@ struct bch_inode_generation {
 	x(bi_foreground_target,		16)	\
 	x(bi_background_target,		16)	\
 	x(bi_erasure_code,		16)	\
-	x(bi_fields_set,		16)
+	x(bi_fields_set,		16)	\
+	x(bi_dir,			64)	\
+	x(bi_dir_offset,		64)
 
 /* subset of BCH_INODE_FIELDS */
 #define BCH_INODE_OPTS()			\
@@ -743,6 +744,7 @@ enum {
 	__BCH_INODE_I_SIZE_DIRTY= 5,
 	__BCH_INODE_I_SECTORS_DIRTY= 6,
 	__BCH_INODE_UNLINKED	= 7,
+	__BCH_INODE_BACKPTR_UNTRUSTED = 8,
 
 	/* bits 20+ reserved for packed fields below: */
 };
@@ -755,6 +757,7 @@ enum {
 #define BCH_INODE_I_SIZE_DIRTY	(1 << __BCH_INODE_I_SIZE_DIRTY)
 #define BCH_INODE_I_SECTORS_DIRTY (1 << __BCH_INODE_I_SECTORS_DIRTY)
 #define BCH_INODE_UNLINKED	(1 << __BCH_INODE_UNLINKED)
+#define BCH_INODE_BACKPTR_UNTRUSTED (1 << __BCH_INODE_BACKPTR_UNTRUSTED)
 
 LE32_BITMASK(INODE_STR_HASH,	struct bch_inode, bi_flags, 20, 24);
 LE32_BITMASK(INODE_NR_FIELDS,	struct bch_inode, bi_flags, 24, 31);
@@ -1204,7 +1207,9 @@ enum bcachefs_metadata_version {
 	bcachefs_metadata_version_new_versioning	= 10,
 	bcachefs_metadata_version_bkey_renumber		= 10,
 	bcachefs_metadata_version_inode_btree_change	= 11,
-	bcachefs_metadata_version_max			= 12,
+	bcachefs_metadata_version_snapshot		= 12,
+	bcachefs_metadata_version_inode_backpointers	= 13,
+	bcachefs_metadata_version_max			= 14,
 };
 
 #define bcachefs_metadata_version_current	(bcachefs_metadata_version_max - 1)
@@ -1308,10 +1313,9 @@ LE64_BITMASK(BCH_SB_GRPQUOTA,		struct bch_sb, flags[0], 58, 59);
 LE64_BITMASK(BCH_SB_PRJQUOTA,		struct bch_sb, flags[0], 59, 60);
 
 LE64_BITMASK(BCH_SB_HAS_ERRORS,		struct bch_sb, flags[0], 60, 61);
+LE64_BITMASK(BCH_SB_HAS_TOPOLOGY_ERRORS,struct bch_sb, flags[0], 61, 62);
 
-LE64_BITMASK(BCH_SB_REFLINK,		struct bch_sb, flags[0], 61, 62);
-
-/* 61-64 unused */
+LE64_BITMASK(BCH_SB_BIG_ENDIAN,		struct bch_sb, flags[0], 62, 63);
 
 LE64_BITMASK(BCH_SB_STR_HASH_TYPE,	struct bch_sb, flags[1],  0,  4);
 LE64_BITMASK(BCH_SB_COMPRESSION_TYPE,	struct bch_sb, flags[1],  4,  8);
@@ -1375,6 +1379,7 @@ LE64_BITMASK(BCH_SB_METADATA_TARGET,	struct bch_sb, flags[3], 16, 28);
 	((1ULL << BCH_FEATURE_new_extent_overwrite)|	\
 	 (1ULL << BCH_FEATURE_extents_above_btree_updates)|\
 	 (1ULL << BCH_FEATURE_btree_updates_journalled)|\
+	 (1ULL << BCH_FEATURE_alloc_v2)|\
 	 (1ULL << BCH_FEATURE_extents_across_btree_nodes))
 
 #define BCH_SB_FEATURES_ALL				\
@@ -1382,8 +1387,7 @@ LE64_BITMASK(BCH_SB_METADATA_TARGET,	struct bch_sb, flags[3], 16, 28);
 	 (1ULL << BCH_FEATURE_new_siphash)|		\
 	 (1ULL << BCH_FEATURE_btree_ptr_v2)|		\
 	 (1ULL << BCH_FEATURE_new_varint)|		\
-	 (1ULL << BCH_FEATURE_journal_no_flush)|	\
-	 (1ULL << BCH_FEATURE_alloc_v2))
+	 (1ULL << BCH_FEATURE_journal_no_flush))
 
 enum bch_sb_feature {
 #define x(f, n) BCH_FEATURE_##f,
@@ -1392,9 +1396,17 @@ enum bch_sb_feature {
 	BCH_FEATURE_NR,
 };
 
+#define BCH_SB_COMPAT()					\
+	x(alloc_info,				0)	\
+	x(alloc_metadata,			1)	\
+	x(extents_above_btree_updates_done,	2)	\
+	x(bformat_overflow_done,		3)
+
 enum bch_sb_compat {
-	BCH_COMPAT_FEAT_ALLOC_INFO	= 0,
-	BCH_COMPAT_FEAT_ALLOC_METADATA	= 1,
+#define x(f, n) BCH_COMPAT_##f,
+	BCH_SB_COMPAT()
+#undef x
+	BCH_COMPAT_NR,
 };
 
 /* options: */
@@ -1733,7 +1745,7 @@ struct btree_node {
 	/* Closed interval: */
 	struct bpos		min_key;
 	struct bpos		max_key;
-	struct bch_extent_ptr	ptr;
+	struct bch_extent_ptr	_ptr; /* not used anymore */
 	struct bkey_format	format;
 
 	union {

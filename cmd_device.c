@@ -123,11 +123,9 @@ static void device_remove_usage(void)
 {
 	puts("bcachefs device_remove - remove a device from a filesystem\n"
 	     "Usage:\n"
-	     "  bcachefs device remove device\n"
-	     "  bcachefs device remove --by-id path devid\n"
+	     "  bcachefs device remove <device>|<devid> <path>\n"
 	     "\n"
 	     "Options:\n"
-	     "  -i, --by-id                 Remove device by device id\n"
 	     "  -f, --force		    Force removal, even if some data\n"
 	     "                              couldn't be migrated\n"
 	     "  -F, --force-metadata	    Force removal, even if some metadata\n"
@@ -148,14 +146,10 @@ int cmd_device_remove(int argc, char *argv[])
 	};
 	struct bchfs_handle fs;
 	bool by_id = false;
-	int opt, flags = BCH_FORCE_IF_DEGRADED;
-	unsigned dev_idx;
+	int opt, flags = BCH_FORCE_IF_DEGRADED, dev_idx;
 
 	while ((opt = getopt_long(argc, argv, "fh", longopts, NULL)) != -1)
 		switch (opt) {
-		case 'i':
-			by_id = true;
-			break;
 		case 'f':
 			flags |= BCH_FORCE_IF_DATA_LOST;
 			break;
@@ -167,31 +161,30 @@ int cmd_device_remove(int argc, char *argv[])
 		}
 	args_shift(optind);
 
-	if (by_id) {
-		char *path = arg_pop();
-		if (!path)
-			die("Please supply filesystem to remove device from");
+	char *dev_str = arg_pop();
+	if (!dev_str)
+		die("Please supply a device");
 
-		char *dev_str = arg_pop();
-		if (!dev_str)
-			die("Please supply device id");
+	char *end;
+	dev_idx = strtoul(dev_str, &end, 10);
+	if (*dev_str && !*end)
+		by_id = true;
 
-		errno = 0;
-		dev_idx = strtoul(dev_str, NULL, 10);
-		if (errno)
-			die("Error parsing device id: %m");
+	char *fs_path = arg_pop();
+	if (fs_path) {
+		fs = bcache_fs_open(fs_path);
 
-		fs = bcache_fs_open(path);
+		if (!by_id) {
+			dev_idx = bchu_dev_path_to_idx(fs, dev_str);
+			if (dev_idx < 0)
+				die("%s does not seem to be a member of %s",
+				    dev_str, fs_path);
+		}
+	} else if (!by_id) {
+		fs = bchu_fs_open_by_dev(dev_str, &dev_idx);
 	} else {
-		char *dev = arg_pop();
-		if (!dev)
-			die("Please supply a device to remove");
-
-		fs = bchu_fs_open_by_dev(dev, &dev_idx);
+		die("Filesystem path required when specifying device by id");
 	}
-
-	if (argc)
-		die("too many arguments");
 
 	bchu_disk_remove(fs, dev_idx, flags);
 	return 0;
@@ -227,7 +220,7 @@ int cmd_device_online(int argc, char *argv[])
 	if (argc)
 		die("too many arguments");
 
-	unsigned dev_idx;
+	int dev_idx;
 	struct bchfs_handle fs = bchu_fs_open_by_dev(dev, &dev_idx);
 	bchu_disk_online(fs, dev);
 	return 0;
@@ -272,7 +265,7 @@ int cmd_device_offline(int argc, char *argv[])
 	if (argc)
 		die("too many arguments");
 
-	unsigned dev_idx;
+	int dev_idx;
 	struct bchfs_handle fs = bchu_fs_open_by_dev(dev, &dev_idx);
 	bchu_disk_offline(fs, dev_idx, flags);
 	return 0;
@@ -308,7 +301,7 @@ int cmd_device_evacuate(int argc, char *argv[])
 	if (argc)
 		die("too many arguments");
 
-	unsigned dev_idx;
+	int dev_idx;
 	struct bchfs_handle fs = bchu_fs_open_by_dev(dev_path, &dev_idx);
 
 	struct bch_ioctl_dev_usage u = bchu_dev_usage(fs, dev_idx);
@@ -320,8 +313,10 @@ int cmd_device_evacuate(int argc, char *argv[])
 
 	return bchu_data(fs, (struct bch_ioctl_data) {
 		.op		= BCH_DATA_OP_MIGRATE,
-		.start		= POS_MIN,
-		.end		= POS_MAX,
+		.start_btree	= 0,
+		.start_pos	= POS_MIN,
+		.end_btree	= BTREE_ID_NR,
+		.end_pos	= POS_MAX,
 		.migrate.dev	= dev_idx,
 	});
 }
@@ -329,10 +324,14 @@ int cmd_device_evacuate(int argc, char *argv[])
 static void device_set_state_usage(void)
 {
 	puts("bcachefs device set-state\n"
-	     "Usage: bcachefs device set-state device new-state\n"
+	     "Usage: bcachefs device set-state <new-state> <device>|<devid> <path>\n"
+	     "\n"
+	     "<new-state>: one of rw, ro, failed or spare\n"
+	     "<path>: path to mounted filesystem, optional unless specifying device by id\n"
 	     "\n"
 	     "Options:\n"
 	     "  -f, --force		    Force, if data redundancy will be degraded\n"
+	     "      --force-if-data-lost    Force, if data will be lost\n"
 	     "  -o, --offline               Set state of an offline device\n"
 	     "  -h, --help                  display this help and exit\n"
 	     "Report bugs to <linux-bcache@vger.kernel.org>");
@@ -343,17 +342,24 @@ int cmd_device_set_state(int argc, char *argv[])
 {
 	static const struct option longopts[] = {
 		{ "force",			0, NULL, 'f' },
+		{ "force-if-data-lost",		0, NULL, 'F' },
 		{ "offline",			0, NULL, 'o' },
 		{ "help",			0, NULL, 'h' },
 		{ NULL }
 	};
-	int opt, flags = 0;
+	struct bchfs_handle fs;
+	bool by_id = false;
+	int opt, flags = 0, dev_idx;
 	bool offline = false;
 
 	while ((opt = getopt_long(argc, argv, "foh", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'f':
 			flags |= BCH_FORCE_IF_DEGRADED;
+			break;
+		case 'F':
+			flags |= BCH_FORCE_IF_DEGRADED;
+			flags |= BCH_FORCE_IF_LOST;
 			break;
 		case 'o':
 			offline = true;
@@ -363,10 +369,6 @@ int cmd_device_set_state(int argc, char *argv[])
 		}
 	args_shift(optind);
 
-	char *dev_path = arg_pop();
-	if (!dev_path)
-		die("Please supply a device");
-
 	char *new_state_str = arg_pop();
 	if (!new_state_str)
 		die("Please supply a device state");
@@ -374,20 +376,25 @@ int cmd_device_set_state(int argc, char *argv[])
 	unsigned new_state = read_string_list_or_die(new_state_str,
 					bch2_member_states, "device state");
 
-	if (!offline) {
-		unsigned dev_idx;
-		struct bchfs_handle fs = bchu_fs_open_by_dev(dev_path, &dev_idx);
+	char *dev_str = arg_pop();
+	if (!dev_str)
+		die("Please supply a device");
 
-		bchu_disk_set_state(fs, dev_idx, new_state, flags);
+	char *end;
+	dev_idx = strtoul(dev_str, &end, 10);
+	if (*dev_str && !*end)
+		by_id = true;
 
-		bcache_fs_close(fs);
-	} else {
+	if (offline) {
 		struct bch_opts opts = bch2_opts_empty();
 		struct bch_sb_handle sb = { NULL };
 
-		int ret = bch2_read_super(dev_path, &opts, &sb);
+		if (by_id)
+			die("Cannot specify offline device by id");
+
+		int ret = bch2_read_super(dev_str, &opts, &sb);
 		if (ret)
-			die("error opening %s: %s", dev_path, strerror(-ret));
+			die("error opening %s: %s", dev_str, strerror(-ret));
 
 		struct bch_member *m = bch2_sb_get_members(sb.sb)->members + sb.sb->dev_idx;
 
@@ -397,7 +404,26 @@ int cmd_device_set_state(int argc, char *argv[])
 
 		bch2_super_write(sb.bdev->bd_fd, sb.sb);
 		bch2_free_super(&sb);
+		return 0;
 	}
+
+	char *fs_path = arg_pop();
+	if (fs_path) {
+		fs = bcache_fs_open(fs_path);
+
+		if (!by_id) {
+			dev_idx = bchu_dev_path_to_idx(fs, dev_str);
+			if (dev_idx < 0)
+				die("%s does not seem to be a member of %s",
+				    dev_str, fs_path);
+		}
+	} else if (!by_id) {
+		fs = bchu_fs_open_by_dev(dev_str, &dev_idx);
+	} else {
+		die("Filesystem path required when specifying device by id");
+	}
+
+	bchu_disk_set_state(fs, dev_idx, new_state, flags);
 
 	return 0;
 }

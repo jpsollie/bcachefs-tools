@@ -59,6 +59,7 @@ static void usage(void)
 	     "\n"
 	     "Commands for managing filesystem data:\n"
 	     "  data rereplicate     Rereplicate degraded data\n"
+	     "  data job             Kick off low level data jobs\n"
 	     "\n"
 	     "Encryption:\n"
 	     "  unlock               Unlock an encrypted filesystem prior to running/mounting\n"
@@ -141,6 +142,8 @@ static int data_cmds(int argc, char *argv[])
 
 	if (!strcmp(cmd, "rereplicate"))
 		return cmd_data_rereplicate(argc, argv);
+	if (!strcmp(cmd, "job"))
+		return cmd_data_job(argc, argv);
 
 	usage();
 	return 0;

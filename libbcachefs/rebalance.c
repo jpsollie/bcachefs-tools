@@ -239,10 +239,11 @@ static int bch2_rebalance_thread(void *arg)
 		rebalance_work_reset(c);
 
 		bch2_move_data(c,
+			       0,		POS_MIN,
+			       BTREE_ID_NR,	POS_MAX,
 			       /* ratelimiting disabled for now */
 			       NULL, /*  &r->pd.rate, */
 			       writepoint_ptr(&c->rebalance_write_point),
-			       POS_MIN, POS_MAX,
 			       rebalance_pred, NULL,
 			       &r->move_stats);
 	}
@@ -280,10 +281,10 @@ void bch2_rebalance_work_to_text(struct printbuf *out, struct bch_fs *c)
 		       h1);
 		break;
 	case REBALANCE_RUNNING:
-		pr_buf(out, "running\n");
-		pr_buf(out, "pos %llu:%llu\n",
-		       r->move_stats.pos.inode,
-		       r->move_stats.pos.offset);
+		pr_buf(out, "running\n"
+		       "pos ");
+		bch2_bpos_to_text(out, r->move_stats.pos);
+		pr_buf(out, "\n");
 		break;
 	}
 }
@@ -311,12 +312,17 @@ int bch2_rebalance_start(struct bch_fs *c)
 {
 	struct task_struct *p;
 
+	if (c->rebalance.thread)
+		return 0;
+
 	if (c->opts.nochanges)
 		return 0;
 
 	p = kthread_create(bch2_rebalance_thread, c, "bch-rebalance/%s", c->name);
-	if (IS_ERR(p))
+	if (IS_ERR(p)) {
+		bch_err(c, "error creating rebalance thread: %li", PTR_ERR(p));
 		return PTR_ERR(p);
+	}
 
 	get_task_struct(p);
 	rcu_assign_pointer(c->rebalance.thread, p);

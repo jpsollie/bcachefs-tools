@@ -4,6 +4,7 @@
 #include <sys/ioctl.h>
 
 #include "libbcachefs/bcachefs_ioctl.h"
+#include "libbcachefs/btree_cache.h"
 
 #include "cmds.h"
 #include "libbcachefs.h"
@@ -41,8 +42,83 @@ int cmd_data_rereplicate(int argc, char *argv[])
 		die("too many arguments");
 
 	return bchu_data(bcache_fs_open(fs_path), (struct bch_ioctl_data) {
-		.op	= BCH_DATA_OP_REREPLICATE,
-		.start	= POS_MIN,
-		.end	= POS_MAX,
+		.op		= BCH_DATA_OP_REREPLICATE,
+		.start_btree	= 0,
+		.start_pos	= POS_MIN,
+		.end_btree	= BTREE_ID_NR,
+		.end_pos	= POS_MAX,
 	});
+}
+
+static void data_job_usage(void)
+{
+	puts("bcachefs data job\n"
+	     "Usage: bcachefs data job [job} filesystem\n"
+	     "\n"
+	     "Kick off a data job and report progress\n"
+	     "\n"
+	     "job: one of scrub, rereplicate, migrate, or rewrite_old_nodes\n"
+	     "\n"
+	     "Options:\n"
+	     "  -b btree                    btree to operate on\n"
+	     "  -s inode:offset       start position\n"
+	     "  -e inode:offset       end position\n"
+	     "  -h, --help                  display this help and exit\n"
+	     "Report bugs to <linux-bcache@vger.kernel.org>");
+	exit(EXIT_SUCCESS);
+}
+
+const char * const data_jobs[] = {
+	"scrub",
+	"rereplicate",
+	"migrate",
+	"rewrite_old_nodes",
+	NULL
+};
+
+int cmd_data_job(int argc, char *argv[])
+{
+	struct bch_ioctl_data op = {
+		.start_btree	= 0,
+		.start_pos	= POS_MIN,
+		.end_btree	= BTREE_ID_NR,
+		.end_pos	= POS_MAX,
+	};
+	int opt;
+
+	while ((opt = getopt(argc, argv, "s:e:h")) != -1)
+		switch (opt) {
+		case 'b':
+			op.start_btree = read_string_list_or_die(optarg,
+						bch2_btree_ids, "btree id");
+			op.end_btree = op.start_btree;
+			break;
+		case 's':
+			op.start_pos	= bpos_parse(optarg);
+			break;
+			op.end_pos	= bpos_parse(optarg);
+		case 'e':
+			break;
+		case 'h':
+			data_job_usage();
+		}
+	args_shift(optind);
+
+	char *job = arg_pop();
+	if (!job)
+		die("please specify which type of job");
+
+	op.op = read_string_list_or_die(job, data_jobs, "bad job type");
+
+	if (op.op == BCH_DATA_OP_SCRUB)
+		die("scrub not implemented yet");
+
+	char *fs_path = arg_pop();
+	if (!fs_path)
+		fs_path = ".";
+
+	if (argc)
+		die("too many arguments");
+
+	return bchu_data(bcache_fs_open(fs_path), op);
 }
