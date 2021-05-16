@@ -190,7 +190,8 @@ static bool __journal_entry_close(struct journal *j)
 	 * Hence, we want update/set last_seq on the current journal entry right
 	 * before we open a new one:
 	 */
-	buf->data->last_seq	= cpu_to_le64(journal_last_seq(j));
+	buf->last_seq		= journal_last_seq(j);
+	buf->data->last_seq	= cpu_to_le64(buf->last_seq);
 
 	__bch2_journal_pin_put(j, le64_to_cpu(buf->data->seq));
 
@@ -1187,6 +1188,8 @@ void __bch2_journal_debug_to_text(struct printbuf *out, struct journal *j)
 	       "nr noflush writes:\t%llu\n"
 	       "nr direct reclaim:\t%llu\n"
 	       "nr background reclaim:\t%llu\n"
+	       "reclaim kicked:\t\t%u\n"
+	       "reclaim runs in:\t%u ms\n"
 	       "current entry sectors:\t%u\n"
 	       "current entry error:\t%u\n"
 	       "current entry:\t\t",
@@ -1202,6 +1205,8 @@ void __bch2_journal_debug_to_text(struct printbuf *out, struct journal *j)
 	       j->nr_noflush_writes,
 	       j->nr_direct_reclaim,
 	       j->nr_background_reclaim,
+	       j->reclaim_kicked,
+	       jiffies_to_msecs(j->next_reclaim - jiffies),
 	       j->cur_entry_sectors,
 	       j->cur_entry_error);
 

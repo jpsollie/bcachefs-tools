@@ -436,7 +436,7 @@ static int bch2_check_fix_ptrs(struct bch_fs *c, enum btree_id btree_id,
 				p.ptr.dev, PTR_BUCKET_NR(ca, &p.ptr),
 				bch2_data_types[ptr_data_type(k->k, &p.ptr)],
 				p.ptr.gen)) {
-			if (p.ptr.cached) {
+			if (!p.ptr.cached) {
 				g2->_mark.gen	= g->_mark.gen		= p.ptr.gen;
 				g2->gen_valid	= g->gen_valid		= true;
 				set_bit(BCH_FS_NEED_ALLOC_WRITE, &c->flags);
@@ -450,7 +450,7 @@ static int bch2_check_fix_ptrs(struct bch_fs *c, enum btree_id btree_id,
 				p.ptr.dev, PTR_BUCKET_NR(ca, &p.ptr),
 				bch2_data_types[ptr_data_type(k->k, &p.ptr)],
 				p.ptr.gen, g->mark.gen)) {
-			if (p.ptr.cached) {
+			if (!p.ptr.cached) {
 				g2->_mark.gen	= g->_mark.gen	= p.ptr.gen;
 				g2->gen_valid	= g->gen_valid	= true;
 				g2->_mark.data_type		= 0;
@@ -1020,7 +1020,7 @@ static void bch2_gc_free(struct bch_fs *c)
 static int bch2_gc_done(struct bch_fs *c,
 			bool initial, bool metadata_only)
 {
-	struct bch_dev *ca;
+	struct bch_dev *ca = NULL;
 	bool verify = !metadata_only && (!initial ||
 		       (c->sb.compat & (1ULL << BCH_COMPAT_alloc_info)));
 	unsigned i, dev;
@@ -1166,6 +1166,8 @@ static int bch2_gc_done(struct bch_fs *c,
 #undef copy_stripe_field
 #undef copy_field
 fsck_err:
+	if (ca)
+		percpu_ref_put(&ca->ref);
 	if (ret)
 		bch_err(c, "%s: ret %i", __func__, ret);
 	return ret;
@@ -1174,7 +1176,7 @@ fsck_err:
 static int bch2_gc_start(struct bch_fs *c,
 			 bool metadata_only)
 {
-	struct bch_dev *ca;
+	struct bch_dev *ca = NULL;
 	unsigned i;
 	int ret;
 

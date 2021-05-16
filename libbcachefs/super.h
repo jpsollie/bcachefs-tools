@@ -107,11 +107,8 @@ static inline struct bch_dev *__bch2_next_dev(struct bch_fs *c, unsigned *iter,
 	return ca;
 }
 
-#define __for_each_member_device(ca, c, iter, mask)			\
-	for ((iter) = 0; ((ca) = __bch2_next_dev((c), &(iter), mask)); (iter)++)
-
 #define for_each_member_device_rcu(ca, c, iter, mask)			\
-	__for_each_member_device(ca, c, iter, mask)
+	for ((iter) = 0; ((ca) = __bch2_next_dev((c), &(iter), mask)); (iter)++)
 
 static inline struct bch_dev *bch2_get_next_dev(struct bch_fs *c, unsigned *iter)
 {
@@ -197,7 +194,7 @@ static inline struct bch_devs_mask bch2_online_devs(struct bch_fs *c)
 	return devs;
 }
 
-struct bch_fs *bch2_bdev_to_fs(struct block_device *);
+struct bch_fs *bch2_dev_to_fs(dev_t);
 struct bch_fs *bch2_uuid_to_fs(uuid_le);
 
 bool bch2_dev_state_allowed(struct bch_fs *, struct bch_dev *,

@@ -414,7 +414,8 @@ static long bch2_ioctl_fs_usage(struct bch_fs *c,
 		struct bch_replicas_entry *src_e =
 			cpu_replicas_entry(&c->replicas, i);
 
-		if (replicas_usage_next(dst_e) > dst_end) {
+		/* check that we have enough space for one replicas entry */
+		if (dst_e + 1 > dst_end) {
 			ret = -ERANGE;
 			break;
 		}
@@ -523,7 +524,7 @@ static long bch2_ioctl_read_super(struct bch_fs *c,
 	ret = copy_to_user((void __user *)(unsigned long)arg.sb,
 			   sb, vstruct_bytes(sb));
 err:
-	if (ca)
+	if (!IS_ERR_OR_NULL(ca))
 		percpu_ref_put(&ca->ref);
 	mutex_unlock(&c->sb_lock);
 	return ret;

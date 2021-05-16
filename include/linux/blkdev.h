@@ -59,35 +59,7 @@ static inline struct inode *file_inode(const struct file *f)
 	return f->f_inode;
 }
 
-#define BDEVNAME_SIZE	32
-
-struct request_queue {
-	struct backing_dev_info *backing_dev_info;
-};
-
-struct gendisk {
-};
-
-struct hd_struct {
-	struct kobject		kobj;
-};
-
 #define part_to_dev(part)	(part)
-
-struct block_device {
-	char			name[BDEVNAME_SIZE];
-	struct inode		*bd_inode;
-	struct request_queue	queue;
-	void			*bd_holder;
-	struct hd_struct	*bd_part;
-	struct gendisk		*bd_disk;
-	struct gendisk		__bd_disk;
-	int			bd_fd;
-	int			bd_sync_fd;
-
-	struct backing_dev_info	*bd_bdi;
-	struct backing_dev_info	__bd_bdi;
-};
 
 void generic_make_request(struct bio *);
 int submit_bio_wait(struct bio *);
@@ -111,7 +83,7 @@ sector_t get_capacity(struct gendisk *disk);
 void blkdev_put(struct block_device *bdev, fmode_t mode);
 void bdput(struct block_device *bdev);
 struct block_device *blkdev_get_by_path(const char *path, fmode_t mode, void *holder);
-struct block_device *lookup_bdev(const char *path);
+int lookup_bdev(const char *path, dev_t *);
 
 struct super_block {
 	void			*s_fs_info;

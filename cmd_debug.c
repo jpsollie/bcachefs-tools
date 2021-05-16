@@ -100,6 +100,7 @@ static void dump_one_device(struct bch_fs *c, struct bch_dev *ca, int fd)
 
 	qcow2_write_image(ca->disk_sb.bdev->bd_fd, fd, &data,
 			  max_t(unsigned, btree_bytes(c) / 8, block_bytes(c)));
+	darray_free(data);
 }
 
 int cmd_dump(int argc, char *argv[])

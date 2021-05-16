@@ -1931,8 +1931,9 @@ loop:
 			i_size_write(&inode->v, req->ki_pos);
 		spin_unlock(&inode->v.i_lock);
 
-		bio_for_each_segment_all(bv, bio, iter)
-			put_page(bv->bv_page);
+		if (likely(!bio_flagged(bio, BIO_NO_PAGE_REF)))
+			bio_for_each_segment_all(bv, bio, iter)
+				put_page(bv->bv_page);
 
 		if (dio->op.error) {
 			set_bit(EI_INODE_ERROR, &inode->ei_flags);
@@ -2393,6 +2394,15 @@ err:
 
 /* fallocate: */
 
+static int inode_update_times_fn(struct bch_inode_info *inode,
+				 struct bch_inode_unpacked *bi, void *p)
+{
+	struct bch_fs *c = inode->v.i_sb->s_fs_info;
+
+	bi->bi_mtime = bi->bi_ctime = bch2_current_time(c);
+	return 0;
+}
+
 static long bchfs_fpunch(struct bch_inode_info *inode, loff_t offset, loff_t len)
 {
 	struct bch_fs *c = inode->v.i_sb->s_fs_info;
@@ -2430,6 +2440,11 @@ static long bchfs_fpunch(struct bch_inode_info *inode, loff_t offset, loff_t len
 				  &i_sectors_delta);
 		i_sectors_acct(c, inode, NULL, i_sectors_delta);
 	}
+
+	mutex_lock(&inode->ei_update_lock);
+	ret = bch2_write_inode(c, inode, inode_update_times_fn, NULL,
+			       ATTR_MTIME|ATTR_CTIME) ?: ret;
+	mutex_unlock(&inode->ei_update_lock);
 err:
 	bch2_pagecache_block_put(&inode->ei_pagecache_lock);
 	inode_unlock(&inode->v);

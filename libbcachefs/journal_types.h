@@ -23,6 +23,7 @@ struct journal_buf {
 	__BKEY_PADDED(key, BCH_REPLICAS_MAX);
 
 	struct closure_waitlist	wait;
+	u64			last_seq;	/* copy of data->last_seq */
 
 	unsigned		buf_size;	/* size in bytes of @data */
 	unsigned		sectors;	/* maximum size for current entry */
@@ -248,6 +249,7 @@ struct journal {
 	wait_queue_head_t	reclaim_wait;
 	struct task_struct	*reclaim_thread;
 	bool			reclaim_kicked;
+	unsigned long		next_reclaim;
 	u64			nr_direct_reclaim;
 	u64			nr_background_reclaim;
 

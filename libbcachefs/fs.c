@@ -30,6 +30,7 @@
 #include <linux/posix_acl.h>
 #include <linux/random.h>
 #include <linux/statfs.h>
+#include <linux/string.h>
 #include <linux/xattr.h>
 
 static struct kmem_cache *bch2_inode_cache;
@@ -143,7 +144,7 @@ int __must_check bch2_write_inode(struct bch_fs *c,
 	struct bch_inode_unpacked inode_u;
 	int ret;
 
-	bch2_trans_init(&trans, c, 0, 0);
+	bch2_trans_init(&trans, c, 0, 256);
 retry:
 	bch2_trans_begin(&trans);
 
@@ -998,10 +999,7 @@ static const struct file_operations bch_file_operations = {
 	.open		= generic_file_open,
 	.fsync		= bch2_fsync,
 	.splice_read	= generic_file_splice_read,
-#if 0
-	/* Busted: */
 	.splice_write	= iter_file_splice_write,
-#endif
 	.fallocate	= bch2_fallocate_dispatch,
 	.unlocked_ioctl = bch2_fs_file_ioctl,
 #ifdef CONFIG_COMPAT
@@ -1293,16 +1291,17 @@ static int bch2_sync_fs(struct super_block *sb, int wait)
 	return bch2_journal_flush(&c->journal);
 }
 
-static struct bch_fs *bch2_path_to_fs(const char *dev)
+static struct bch_fs *bch2_path_to_fs(const char *path)
 {
 	struct bch_fs *c;
-	struct block_device *bdev = lookup_bdev(dev);
+	dev_t dev;
+	int ret;
 
-	if (IS_ERR(bdev))
-		return ERR_CAST(bdev);
+	ret = lookup_bdev(path, &dev);
+	if (ret)
+		return ERR_PTR(ret);
 
-	c = bch2_bdev_to_fs(bdev);
-	bdput(bdev);
+	c = bch2_dev_to_fs(dev);
 	if (c)
 		closure_put(&c->cl);
 	return c ?: ERR_PTR(-ENOENT);
@@ -1312,6 +1311,9 @@ static char **split_devs(const char *_dev_name, unsigned *nr)
 {
 	char *dev_name = NULL, **devs = NULL, *s;
 	size_t i, nr_devs = 0;
+
+	if (strlen(_dev_name) == 0)
+		return NULL;
 
 	dev_name = kstrdup(_dev_name, GFP_KERNEL);
 	if (!dev_name)
@@ -1554,7 +1556,9 @@ got_sb:
 #endif
 	sb->s_xattr		= bch2_xattr_handlers;
 	sb->s_magic		= BCACHEFS_STATFS_MAGIC;
-	sb->s_time_gran		= c->sb.time_precision;
+	sb->s_time_gran		= c->sb.nsec_per_time_unit;
+	sb->s_time_min		= div_s64(S64_MIN, c->sb.time_units_per_sec) + 1;
+	sb->s_time_max		= div_s64(S64_MAX, c->sb.time_units_per_sec);
 	c->vfs_sb		= sb;
 	strlcpy(sb->s_id, c->name, sizeof(sb->s_id));
 

@@ -8,11 +8,42 @@
 #include <linux/atomic.h>
 #include <linux/types.h>
 #include <linux/bvec.h>
+#include <linux/kobject.h>
 
 struct bio_set;
 struct bio;
-struct block_device;
 typedef void (bio_end_io_t) (struct bio *);
+
+#define BDEVNAME_SIZE	32
+
+struct request_queue {
+	struct backing_dev_info *backing_dev_info;
+};
+
+struct gendisk {
+};
+
+struct hd_struct {
+	struct kobject		kobj;
+};
+
+struct block_device {
+	struct kobject		kobj;
+	dev_t			bd_dev;
+	char			name[BDEVNAME_SIZE];
+	struct inode		*bd_inode;
+	struct request_queue	queue;
+	void			*bd_holder;
+	struct gendisk *	bd_disk;
+	struct gendisk		__bd_disk;
+	int			bd_fd;
+	int			bd_sync_fd;
+
+	struct backing_dev_info	*bd_bdi;
+	struct backing_dev_info	__bd_bdi;
+};
+
+#define bdev_kobj(_bdev) (&((_bdev)->kobj))
 
 /*
  * Block error status values.  See block/blk-core:blk_errors for the details.

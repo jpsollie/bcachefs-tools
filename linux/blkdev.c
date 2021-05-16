@@ -215,6 +215,7 @@ struct block_device *blkdev_get_by_path(const char *path, fmode_t mode,
 	strncpy(bdev->name, path, sizeof(bdev->name));
 	bdev->name[sizeof(bdev->name) - 1] = '\0';
 
+	bdev->bd_dev		= xfstat(fd).st_rdev;
 	bdev->bd_fd		= fd;
 	bdev->bd_sync_fd	= sync_fd;
 	bdev->bd_holder		= holder;
@@ -230,9 +231,9 @@ void bdput(struct block_device *bdev)
 	BUG();
 }
 
-struct block_device *lookup_bdev(const char *path)
+int lookup_bdev(const char *path, dev_t *dev)
 {
-	return ERR_PTR(-EINVAL);
+	return -EINVAL;
 }
 
 static int aio_completion_thread(void *arg)

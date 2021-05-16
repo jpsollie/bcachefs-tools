@@ -99,7 +99,7 @@ static int bch2_dev_alloc(struct bch_fs *, unsigned);
 static int bch2_dev_sysfs_online(struct bch_fs *, struct bch_dev *);
 static void __bch2_dev_read_only(struct bch_fs *, struct bch_dev *);
 
-struct bch_fs *bch2_bdev_to_fs(struct block_device *bdev)
+struct bch_fs *bch2_dev_to_fs(dev_t dev)
 {
 	struct bch_fs *c;
 	struct bch_dev *ca;
@@ -110,7 +110,7 @@ struct bch_fs *bch2_bdev_to_fs(struct block_device *bdev)
 
 	list_for_each_entry(c, &bch_fs_list, list)
 		for_each_member_device_rcu(ca, c, i, NULL)
-			if (ca->disk_sb.bdev == bdev) {
+			if (ca->disk_sb.bdev && ca->disk_sb.bdev->bd_dev == dev) {
 				closure_get(&c->cl);
 				goto found;
 			}
@@ -544,8 +544,7 @@ void __bch2_fs_stop(struct bch_fs *c)
 	for_each_member_device(ca, c, i)
 		if (ca->kobj.state_in_sysfs &&
 		    ca->disk_sb.bdev)
-			sysfs_remove_link(&part_to_dev(ca->disk_sb.bdev->bd_part)->kobj,
-					  "bcachefs");
+			sysfs_remove_link(bdev_kobj(ca->disk_sb.bdev), "bcachefs");
 
 	if (c->kobj.state_in_sysfs)
 		kobject_del(&c->kobj);
@@ -628,9 +627,11 @@ static const char *bch2_fs_online(struct bch_fs *c)
 	down_write(&c->state_lock);
 
 	err = "error creating sysfs objects";
-	__for_each_member_device(ca, c, i, NULL)
-		if (bch2_dev_sysfs_online(c, ca))
+	for_each_member_device(ca, c, i)
+		if (bch2_dev_sysfs_online(c, ca)) {
+			percpu_ref_put(&ca->ref);
 			goto err;
+		}
 
 	list_add(&c->list, &bch_fs_list);
 	err = NULL;
@@ -1017,8 +1018,7 @@ static void bch2_dev_free(struct bch_dev *ca)
 
 	if (ca->kobj.state_in_sysfs &&
 	    ca->disk_sb.bdev)
-		sysfs_remove_link(&part_to_dev(ca->disk_sb.bdev->bd_part)->kobj,
-				  "bcachefs");
+		sysfs_remove_link(bdev_kobj(ca->disk_sb.bdev), "bcachefs");
 
 	if (ca->kobj.state_in_sysfs)
 		kobject_del(&ca->kobj);
@@ -1054,10 +1054,7 @@ static void __bch2_dev_offline(struct bch_fs *c, struct bch_dev *ca)
 	wait_for_completion(&ca->io_ref_completion);
 
 	if (ca->kobj.state_in_sysfs) {
-		struct kobject *block =
-			&part_to_dev(ca->disk_sb.bdev->bd_part)->kobj;
-
-		sysfs_remove_link(block, "bcachefs");
+		sysfs_remove_link(bdev_kobj(ca->disk_sb.bdev), "bcachefs");
 		sysfs_remove_link(&ca->kobj, "block");
 	}
 
@@ -1094,12 +1091,12 @@ static int bch2_dev_sysfs_online(struct bch_fs *c, struct bch_dev *ca)
 	}
 
 	if (ca->disk_sb.bdev) {
-		struct kobject *block =
-			&part_to_dev(ca->disk_sb.bdev->bd_part)->kobj;
+		struct kobject *block = bdev_kobj(ca->disk_sb.bdev);
 
 		ret = sysfs_create_link(block, &ca->kobj, "bcachefs");
 		if (ret)
 			return ret;
+
 		ret = sysfs_create_link(&ca->kobj, block, "block");
 		if (ret)
 			return ret;
@@ -1837,20 +1834,23 @@ err:
 /* return with ref on ca->ref: */
 struct bch_dev *bch2_dev_lookup(struct bch_fs *c, const char *path)
 {
-	struct block_device *bdev = lookup_bdev(path);
 	struct bch_dev *ca;
+	dev_t dev;
 	unsigned i;
+	int ret;
 
-	if (IS_ERR(bdev))
-		return ERR_CAST(bdev);
+	ret = lookup_bdev(path, &dev);
+	if (ret)
+		return ERR_PTR(ret);
 
-	for_each_member_device(ca, c, i)
-		if (ca->disk_sb.bdev == bdev)
+	rcu_read_lock();
+	for_each_member_device_rcu(ca, c, i, NULL)
+		if (ca->disk_sb.bdev->bd_dev == dev)
 			goto found;
-
 	ca = ERR_PTR(-ENOENT);
 found:
-	bdput(bdev);
+	rcu_read_unlock();
+
 	return ca;
 }
 
