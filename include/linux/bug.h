@@ -29,10 +29,15 @@
 	__ret_warn_on;							\
 })
 
+#define __WARN()							\
+do {									\
+	fprintf(stderr, "WARNING at " __FILE__ ":%d\n", __LINE__);	\
+} while (0)
+
 #define WARN_ON(cond) ({						\
 	int __ret_warn_on = unlikely(!!(cond));				\
 	if (__ret_warn_on)						\
-		fprintf(stderr, "WARNING at " __FILE__ ":%d\n", __LINE__);\
+		__WARN();						\
 	__ret_warn_on;							\
 })
 
@@ -42,8 +47,7 @@
 	int __ret_warn_on = unlikely(!!(cond));				\
 	if (__ret_warn_on && !__warned) {				\
 		__warned = true;					\
-		fprintf(stderr, "WARNING at " __FILE__ ":%d: " fmt "\n",\
-			__LINE__, ##__VA_ARGS__);			\
+		__WARN();						\
 	}								\
 	__ret_warn_on;							\
 })
@@ -53,7 +57,7 @@
 	int __ret_warn_on = unlikely(!!(cond));				\
 	if (__ret_warn_on && !__warned) {				\
 		__warned = true;					\
-		fprintf(stderr, "WARNING at " __FILE__ ":%d\n", __LINE__);\
+		__WARN();						\
 	}								\
 	__ret_warn_on;							\
 })

@@ -1018,6 +1018,8 @@ static void bch2_writepage_io_done(struct closure *cl)
 	struct bio_vec *bvec;
 	unsigned i;
 
+	up(&io->op.c->io_in_flight);
+
 	if (io->op.error) {
 		set_bit(EI_INODE_ERROR, &io->inode->ei_flags);
 
@@ -1079,6 +1081,8 @@ static void bch2_writepage_io_done(struct closure *cl)
 static void bch2_writepage_do_io(struct bch_writepage_state *w)
 {
 	struct bch_writepage_io *io = w->io;
+
+	down(&io->op.c->io_in_flight);
 
 	w->io = NULL;
 	closure_call(&io->op.cl, bch2_write, NULL, &io->cl);
@@ -1819,6 +1823,8 @@ static long bch2_dio_write_loop(struct dio_write *dio)
 	if (dio->loop)
 		goto loop;
 
+	down(&c->io_in_flight);
+
 	while (1) {
 		iter_count = dio->iter.count;
 
@@ -1883,6 +1889,7 @@ static long bch2_dio_write_loop(struct dio_write *dio)
 		if ((req->ki_flags & IOCB_DSYNC) &&
 		    !c->opts.journal_flush_disabled)
 			dio->op.flags |= BCH_WRITE_FLUSH;
+		dio->op.flags |= BCH_WRITE_CHECK_ENOSPC;
 
 		ret = bch2_disk_reservation_get(c, &dio->op.res, bio_sectors(bio),
 						dio->op.opts.data_replicas, 0);
@@ -1949,6 +1956,7 @@ loop:
 
 	ret = dio->op.error ?: ((long) dio->written << 9);
 err:
+	up(&c->io_in_flight);
 	bch2_pagecache_block_put(&inode->ei_pagecache_lock);
 	bch2_quota_reservation_put(c, inode, &dio->quota_res);
 
@@ -2708,7 +2716,7 @@ static int __bchfs_fallocate(struct bch_inode_info *inode, int mode,
 
 		ret = bch2_extent_update(&trans, iter, &reservation.k_i,
 				&disk_res, &inode->ei_journal_seq,
-				0, &i_sectors_delta);
+				0, &i_sectors_delta, true);
 		i_sectors_acct(c, inode, &quota_res, i_sectors_delta);
 bkey_err:
 		bch2_quota_reservation_put(c, inode, &quota_res);
@@ -2928,6 +2936,11 @@ loff_t bch2_remap_file_range(struct file *file_src, loff_t pos_src,
 	if (pos_dst + ret > dst->v.i_size)
 		i_size_write(&dst->v, pos_dst + ret);
 	spin_unlock(&dst->v.i_lock);
+
+	if (((file_dst->f_flags & (__O_SYNC | O_DSYNC)) ||
+	     IS_SYNC(file_inode(file_dst))) &&
+	    !c->opts.journal_flush_disabled)
+		ret = bch2_journal_flush_seq(&c->journal, dst->ei_journal_seq);
 err:
 	bch2_unlock_inodes(INODE_LOCK|INODE_PAGECACHE_BLOCK, src, dst);
 

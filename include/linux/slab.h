@@ -47,10 +47,12 @@ static inline void *krealloc(void *old, size_t size, gfp_t flags)
 	if (flags & __GFP_ZERO)
 		memset(new, 0, size);
 
-	memcpy(new, old,
-	       min(malloc_usable_size(old),
-		   malloc_usable_size(new)));
-	free(old);
+	if (old) {
+		memcpy(new, old,
+		       min(malloc_usable_size(old),
+			   malloc_usable_size(new)));
+		free(old);
+	}
 
 	return new;
 }

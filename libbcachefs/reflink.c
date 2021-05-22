@@ -2,6 +2,7 @@
 #include "bcachefs.h"
 #include "bkey_buf.h"
 #include "btree_update.h"
+#include "buckets.h"
 #include "extents.h"
 #include "inode.h"
 #include "io.h"
@@ -154,7 +155,9 @@ static int bch2_make_extent_indirect(struct btree_trans *trans,
 	*refcount	= 0;
 	memcpy(refcount + 1, &orig->v, bkey_val_bytes(&orig->k));
 
-	bch2_trans_update(trans, reflink_iter, r_v, 0);
+	ret = bch2_trans_update(trans, reflink_iter, r_v, 0);
+	if (ret)
+		goto err;
 
 	r_p = bch2_trans_kmalloc(trans, sizeof(*r_p));
 	if (IS_ERR(r_p)) {
@@ -167,7 +170,7 @@ static int bch2_make_extent_indirect(struct btree_trans *trans,
 	set_bkey_val_bytes(&r_p->k, sizeof(r_p->v));
 	r_p->v.idx = cpu_to_le64(bkey_start_offset(&r_v->k));
 
-	bch2_trans_update(trans, extent_iter, &r_p->k_i, 0);
+	ret = bch2_trans_update(trans, extent_iter, &r_p->k_i, 0);
 err:
 	if (!IS_ERR(reflink_iter))
 		c->reflink_hint = reflink_iter->pos.offset;
@@ -224,6 +227,8 @@ s64 bch2_remap_range(struct bch_fs *c,
 				       BTREE_ITER_INTENT);
 
 	while (ret == 0 || ret == -EINTR) {
+		struct disk_reservation disk_res = { 0 };
+
 		bch2_trans_begin(&trans);
 
 		if (fatal_signal_pending(current)) {
@@ -287,8 +292,10 @@ s64 bch2_remap_range(struct bch_fs *c,
 				    dst_end.offset - dst_iter->pos.offset));
 
 		ret = bch2_extent_update(&trans, dst_iter, new_dst.k,
-					 NULL, journal_seq,
-					 new_i_size, i_sectors_delta);
+					 &disk_res, journal_seq,
+					 new_i_size, i_sectors_delta,
+					 true);
+		bch2_disk_reservation_put(c, &disk_res);
 		if (ret)
 			continue;
 
