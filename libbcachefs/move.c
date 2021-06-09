@@ -163,9 +163,8 @@ static int bch2_migrate_index_update(struct bch_write_op *op)
 				goto out;
 		}
 
-		bch2_trans_update(&trans, iter, insert, 0);
-
-		ret = bch2_trans_commit(&trans, &op->res,
+		ret   = bch2_trans_update(&trans, iter, insert, 0) ?:
+			bch2_trans_commit(&trans, &op->res,
 				op_journal_seq(op),
 				BTREE_INSERT_NOFAIL|
 				m->data_opts.btree_insert_flags);
@@ -522,6 +521,11 @@ static int lookup_inode(struct btree_trans *trans, struct bpos pos,
 	ret = bkey_err(k);
 	if (ret)
 		goto err;
+
+	if (!k.k || bkey_cmp(k.k->p, pos)) {
+		ret = -ENOENT;
+		goto err;
+	}
 
 	ret = k.k->type == KEY_TYPE_inode ? 0 : -EIO;
 	if (ret)
@@ -921,8 +925,8 @@ int bch2_scan_old_btree_nodes(struct bch_fs *c, struct bch_move_stats *stats)
 			      rewrite_old_nodes_pred, c, stats);
 	if (!ret) {
 		mutex_lock(&c->sb_lock);
-		c->disk_sb.sb->compat[0] |= 1ULL << BCH_COMPAT_extents_above_btree_updates_done;
-		c->disk_sb.sb->compat[0] |= 1ULL << BCH_COMPAT_bformat_overflow_done;
+		c->disk_sb.sb->compat[0] |= cpu_to_le64(1ULL << BCH_COMPAT_extents_above_btree_updates_done);
+		c->disk_sb.sb->compat[0] |= cpu_to_le64(1ULL << BCH_COMPAT_bformat_overflow_done);
 		c->disk_sb.sb->version_min = c->disk_sb.sb->version;
 		bch2_write_super(c);
 		mutex_unlock(&c->sb_lock);

@@ -118,7 +118,9 @@ void bch2_journal_halt(struct journal *j)
 
 void __bch2_journal_buf_put(struct journal *j)
 {
-	closure_call(&j->io, bch2_journal_write, system_highpri_wq, NULL);
+	struct bch_fs *c = container_of(j, struct bch_fs, journal);
+
+	closure_call(&j->io, bch2_journal_write, c->io_complete_wq, NULL);
 }
 
 /*
@@ -304,7 +306,7 @@ static int journal_entry_open(struct journal *j)
 				       j->res_get_blocked_start);
 	j->res_get_blocked_start = 0;
 
-	mod_delayed_work(system_freezable_wq,
+	mod_delayed_work(c->io_complete_wq,
 			 &j->write_work,
 			 msecs_to_jiffies(j->write_delay_ms));
 	journal_wake(j);
@@ -805,7 +807,8 @@ static int __bch2_set_nr_journal_buckets(struct bch_dev *ca, unsigned nr,
 		long b;
 
 		if (new_fs) {
-			percpu_down_read(&c->mark_lock);
+			if (c)
+				percpu_down_read(&c->mark_lock);
 			b = bch2_bucket_alloc_new_fs(ca);
 			if (b < 0) {
 				percpu_up_read(&c->mark_lock);
@@ -825,7 +828,8 @@ static int __bch2_set_nr_journal_buckets(struct bch_dev *ca, unsigned nr,
 			b = sector_to_bucket(ca, ob->ptr.offset);
 		}
 
-		spin_lock(&c->journal.lock);
+		if (c)
+			spin_lock(&c->journal.lock);
 
 		/*
 		 * XXX
@@ -852,14 +856,16 @@ static int __bch2_set_nr_journal_buckets(struct bch_dev *ca, unsigned nr,
 		if (pos <= ja->cur_idx)
 			ja->cur_idx = (ja->cur_idx + 1) % ja->nr;
 
-		spin_unlock(&c->journal.lock);
+		if (c)
+			spin_unlock(&c->journal.lock);
 
 		if (new_fs) {
 			bch2_mark_metadata_bucket(c, ca, b, BCH_DATA_journal,
 						  ca->mi.bucket_size,
 						  gc_phase(GC_PHASE_SB),
 						  0);
-			percpu_up_read(&c->mark_lock);
+			if (c)
+				percpu_up_read(&c->mark_lock);
 		} else {
 			ret = bch2_trans_do(c, NULL, NULL, BTREE_INSERT_NOFAIL,
 				bch2_trans_mark_metadata_bucket(&trans, ca,

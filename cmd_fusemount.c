@@ -212,6 +212,7 @@ retry:
 		bch2_trans_commit(&trans, NULL, NULL,
 				  BTREE_INSERT_NOFAIL);
 err:
+        bch2_trans_iter_put(&trans, iter);
 	if (ret == -EINTR)
 		goto retry;
 
@@ -548,6 +549,7 @@ retry:
 				BTREE_INSERT_NOFAIL);
 
 err:
+        bch2_trans_iter_put(&trans, iter);
 	if (ret == -EINTR)
 		goto retry;
 

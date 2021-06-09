@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import errno
 import os
 import pytest
 import re
@@ -49,6 +50,8 @@ def run(cmd, *args, valgrind=False, check=False):
         vout = tempfile.NamedTemporaryFile()
         vcmd = ['valgrind',
                '--leak-check=full',
+               '--gen-suppressions=all',
+               '--suppressions=valgrind-suppressions.txt',
                '--log-file={}'.format(vout.name)]
         cmds = vcmd + cmds
 
@@ -161,6 +164,8 @@ class BFuse:
             vlog = tempfile.NamedTemporaryFile()
             cmd += [ 'valgrind',
                      '--leak-check=full',
+                     '--gen-suppressions=all',
+                     '--suppressions=valgrind-suppressions.txt',
                      '--log-file={}'.format(vlog.name) ]
 
         cmd += [ BCH_PATH,
@@ -179,9 +184,17 @@ class BFuse:
         (out2, _) = self.proc.communicate()
         print("Process exited.")
 
+        self.returncode = self.proc.returncode
+        if self.returncode == 0:
+            errors = [ 'btree iterators leaked!',
+                       'emergency read only!' ]
+            for e in errors:
+                if e in out2:
+                    print('Debug error found in output: "{}"'.format(e))
+                    self.returncode = errno.ENOMSG
+
         self.stdout = out1 + out2
         self.stderr = err.read()
-        self.returncode = self.proc.returncode
         self.vout = vlog.read().decode('utf-8')
 
     def expect(self, pipe, regex):

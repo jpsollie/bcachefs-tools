@@ -37,7 +37,7 @@ ifneq (,$(findstring clang,$(CC_VERSION)))
 		-Wno-enum-conversion
 endif
 
-ifdef D
+ifdef BCACHEFS_DEBUG
 	CFLAGS+=-Werror
 	CFLAGS+=-DCONFIG_BCACHEFS_DEBUG=y
 endif

@@ -509,10 +509,14 @@ static void __bch2_fs_free(struct bch_fs *c)
 	kfree(c->unused_inode_hints);
 	free_heap(&c->copygc_heap);
 
+	if (c->io_complete_wq )
+		destroy_workqueue(c->io_complete_wq );
 	if (c->copygc_wq)
 		destroy_workqueue(c->copygc_wq);
-	if (c->wq)
-		destroy_workqueue(c->wq);
+	if (c->btree_error_wq)
+		destroy_workqueue(c->btree_error_wq);
+	if (c->btree_update_wq)
+		destroy_workqueue(c->btree_update_wq);
 
 	bch2_free_super(&c->disk_sb);
 	kvpfree(c, sizeof(*c));
@@ -760,10 +764,14 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 
 	c->inode_shard_bits = ilog2(roundup_pow_of_two(num_possible_cpus()));
 
-	if (!(c->wq = alloc_workqueue("bcachefs",
+	if (!(c->btree_update_wq = alloc_workqueue("bcachefs",
+				WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_CPU_INTENSIVE, 1)) ||
+	    !(c->btree_error_wq = alloc_workqueue("bcachefs_error",
 				WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_CPU_INTENSIVE, 1)) ||
 	    !(c->copygc_wq = alloc_workqueue("bcachefs_copygc",
 				WQ_FREEZABLE|WQ_MEM_RECLAIM|WQ_CPU_INTENSIVE, 1)) ||
+	    !(c->io_complete_wq = alloc_workqueue("bcachefs_io",
+				WQ_FREEZABLE|WQ_HIGHPRI|WQ_MEM_RECLAIM, 1)) ||
 	    percpu_ref_init(&c->writes, bch2_writes_disabled,
 			    PERCPU_REF_INIT_DEAD, GFP_KERNEL) ||
 	    mempool_init_kmalloc_pool(&c->fill_iter, 1, iter_size) ||
@@ -1437,7 +1445,7 @@ int bch2_dev_set_state(struct bch_fs *c, struct bch_dev *ca,
 
 /* Device add/removal: */
 
-int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca)
+static int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca)
 {
 	struct btree_trans trans;
 	size_t i;
@@ -1815,6 +1823,11 @@ int bch2_dev_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 	ret = bch2_dev_buckets_resize(c, ca, nbuckets);
 	if (ret) {
 		bch_err(ca, "Resize error: %i", ret);
+		goto err;
+	}
+
+	ret = bch2_trans_mark_dev_sb(c, ca);
+	if (ret) {
 		goto err;
 	}
 

@@ -333,8 +333,7 @@ int bch2_inode_write(struct btree_trans *trans,
 
 	bch2_inode_pack(trans->c, inode_p, inode);
 	inode_p->inode.k.p.snapshot = iter->snapshot;
-	bch2_trans_update(trans, iter, &inode_p->inode.k_i, 0);
-	return 0;
+	return bch2_trans_update(trans, iter, &inode_p->inode.k_i, 0);
 }
 
 const char *bch2_inode_invalid(const struct bch_fs *c, struct bkey_s_c k)
@@ -472,23 +471,28 @@ static inline u32 bkey_generation(struct bkey_s_c k)
 
 struct btree_iter *bch2_inode_create(struct btree_trans *trans,
 				     struct bch_inode_unpacked *inode_u,
-				     u32 snapshot)
+				     u32 snapshot, u64 cpu)
 {
 	struct bch_fs *c = trans->c;
 	struct btree_iter *iter = NULL;
 	struct bkey_s_c k;
 	u64 min, max, start, pos, *hint;
 	int ret = 0;
+	unsigned bits = (c->opts.inodes_32bit ? 31 : 63);
 
-	u64 cpu = raw_smp_processor_id();
-	unsigned bits = (c->opts.inodes_32bit
-		? 31 : 63) - c->inode_shard_bits;
+	if (c->opts.shard_inode_numbers) {
+		bits -= c->inode_shard_bits;
 
-	min = (cpu << bits);
-	max = (cpu << bits) | ~(ULLONG_MAX << bits);
+		min = (cpu << bits);
+		max = (cpu << bits) | ~(ULLONG_MAX << bits);
 
-	min = max_t(u64, min, BLOCKDEV_INODE_MAX);
-	hint = c->unused_inode_hints + cpu;
+		min = max_t(u64, min, BLOCKDEV_INODE_MAX);
+		hint = c->unused_inode_hints + cpu;
+	} else {
+		min = BLOCKDEV_INODE_MAX;
+		max = ~(ULLONG_MAX << bits);
+		hint = c->unused_inode_hints;
+	}
 
 	start = READ_ONCE(*hint);
 
@@ -575,7 +579,7 @@ int bch2_inode_rm(struct bch_fs *c, u64 inode_nr, bool cached)
 	struct bkey_s_c k;
 	int ret;
 
-	bch2_trans_init(&trans, c, 0, 0);
+	bch2_trans_init(&trans, c, 0, 1024);
 
 	/*
 	 * If this was a directory, there shouldn't be any real dirents left -
@@ -624,9 +628,8 @@ retry:
 	delete.k.p = iter->pos;
 	delete.v.bi_generation = cpu_to_le32(inode_u.bi_generation + 1);
 
-	bch2_trans_update(&trans, iter, &delete.k_i, 0);
-
-	ret = bch2_trans_commit(&trans, NULL, NULL,
+	ret   = bch2_trans_update(&trans, iter, &delete.k_i, 0) ?:
+		bch2_trans_commit(&trans, NULL, NULL,
 				BTREE_INSERT_NOFAIL);
 err:
 	bch2_trans_iter_put(&trans, iter);

@@ -170,8 +170,8 @@ success:
 	return true;
 }
 
-static inline bool btree_iter_get_locks(struct btree_iter *iter,
-					bool upgrade, bool trace)
+static inline bool btree_iter_get_locks(struct btree_iter *iter, bool upgrade,
+					unsigned long trace_ip)
 {
 	unsigned l = iter->level;
 	int fail_idx = -1;
@@ -183,16 +183,17 @@ static inline bool btree_iter_get_locks(struct btree_iter *iter,
 		if (!(upgrade
 		      ? bch2_btree_node_upgrade(iter, l)
 		      : bch2_btree_node_relock(iter, l))) {
-			if (trace)
-				(upgrade
-				 ? trace_node_upgrade_fail
-				 : trace_node_relock_fail)(l, iter->l[l].lock_seq,
-						is_btree_node(iter, l)
-						? 0
-						: (unsigned long) iter->l[l].b,
-						is_btree_node(iter, l)
-						? iter->l[l].b->c.lock.state.seq
-						: 0);
+			(upgrade
+			 ? trace_node_upgrade_fail
+			 : trace_node_relock_fail)(iter->trans->ip, trace_ip,
+					iter->btree_id, &iter->real_pos,
+					l, iter->l[l].lock_seq,
+					is_btree_node(iter, l)
+					? 0
+					: (unsigned long) iter->l[l].b,
+					is_btree_node(iter, l)
+					? iter->l[l].b->c.lock.state.seq
+					: 0);
 
 			fail_idx = l;
 			btree_iter_set_dirty(iter, BTREE_ITER_NEED_TRAVERSE);
@@ -372,9 +373,9 @@ static inline void bch2_btree_iter_verify_locks(struct btree_iter *iter) {}
 #endif
 
 __flatten
-bool bch2_btree_iter_relock(struct btree_iter *iter, bool trace)
+static bool bch2_btree_iter_relock(struct btree_iter *iter, unsigned long trace_ip)
 {
-	return btree_iter_get_locks(iter, false, trace);
+	return btree_iter_get_locks(iter, false, trace_ip);
 }
 
 bool __bch2_btree_iter_upgrade(struct btree_iter *iter,
@@ -386,7 +387,7 @@ bool __bch2_btree_iter_upgrade(struct btree_iter *iter,
 
 	iter->locks_want = new_locks_want;
 
-	if (btree_iter_get_locks(iter, true, true))
+	if (btree_iter_get_locks(iter, true, _THIS_IP_))
 		return true;
 
 	/*
@@ -414,7 +415,7 @@ bool __bch2_btree_iter_upgrade(struct btree_iter *iter,
 		    linked->btree_id == iter->btree_id &&
 		    linked->locks_want < new_locks_want) {
 			linked->locks_want = new_locks_want;
-			btree_iter_get_locks(linked, true, false);
+			btree_iter_get_locks(linked, true, _THIS_IP_);
 		}
 
 	return false;
@@ -455,13 +456,22 @@ void bch2_trans_downgrade(struct btree_trans *trans)
 
 /* Btree transaction locking: */
 
+static inline bool btree_iter_should_be_locked(struct btree_trans *trans,
+					       struct btree_iter *iter)
+{
+	return (iter->flags & BTREE_ITER_KEEP_UNTIL_COMMIT) ||
+		iter->should_be_locked;
+}
+
 bool bch2_trans_relock(struct btree_trans *trans)
 {
 	struct btree_iter *iter;
 
 	trans_for_each_iter(trans, iter)
-		if (!bch2_btree_iter_relock(iter, true)) {
-			trace_trans_restart_relock(trans->ip);
+		if (!bch2_btree_iter_relock(iter, _RET_IP_) &&
+		    btree_iter_should_be_locked(trans, iter)) {
+			trace_trans_restart_relock(trans->ip, _RET_IP_,
+					iter->btree_id, &iter->real_pos);
 			return false;
 		}
 	return true;
@@ -829,7 +839,14 @@ static inline struct bkey_s_c __btree_iter_unpack(struct btree_iter *iter,
 
 	ret = bkey_disassemble(l->b, k, u);
 
-	if (bch2_debug_check_bkeys)
+	/*
+	 * XXX: bch2_btree_bset_insert_key() generates invalid keys when we
+	 * overwrite extents - it sets k->type = KEY_TYPE_deleted on the key
+	 * being overwritten but doesn't change k->size. But this is ok, because
+	 * those keys are never written out, we just have to avoid a spurious
+	 * assertion here:
+	 */
+	if (bch2_debug_check_bkeys && !bkey_deleted(ret.k))
 		bch2_bkey_debugcheck(iter->trans->c, l->b, ret);
 
 	return ret;
@@ -1175,7 +1192,8 @@ err:
 
 static int btree_iter_traverse_one(struct btree_iter *, unsigned long);
 
-static int __btree_iter_traverse_all(struct btree_trans *trans, int ret)
+static int __btree_iter_traverse_all(struct btree_trans *trans, int ret,
+				     unsigned long trace_ip)
 {
 	struct bch_fs *c = trans->c;
 	struct btree_iter *iter;
@@ -1192,7 +1210,7 @@ retry_all:
 	relock_fail = false;
 
 	trans_for_each_iter(trans, iter) {
-		if (!bch2_btree_iter_relock(iter, true))
+		if (!bch2_btree_iter_relock(iter, _THIS_IP_))
 			relock_fail = true;
 		sorted[nr_sorted++] = iter->idx;
 	}
@@ -1269,13 +1287,13 @@ out:
 
 	trans->in_traverse_all = false;
 
-	trace_trans_traverse_all(trans->ip);
+	trace_trans_traverse_all(trans->ip, trace_ip);
 	return ret;
 }
 
 int bch2_btree_iter_traverse_all(struct btree_trans *trans)
 {
-	return __btree_iter_traverse_all(trans, 0);
+	return __btree_iter_traverse_all(trans, 0, _RET_IP_);
 }
 
 static inline bool btree_iter_good_node(struct btree_iter *iter,
@@ -1320,6 +1338,7 @@ static int btree_iter_traverse_one(struct btree_iter *iter,
 				   unsigned long trace_ip)
 {
 	unsigned depth_want = iter->level;
+	int ret = 0;
 
 	/*
 	 * if we need interior nodes locked, call btree_iter_relock() to make
@@ -1327,16 +1346,18 @@ static int btree_iter_traverse_one(struct btree_iter *iter,
 	 */
 	if (iter->uptodate == BTREE_ITER_NEED_RELOCK ||
 	    iter->locks_want > 1)
-		bch2_btree_iter_relock(iter, false);
+		bch2_btree_iter_relock(iter, _THIS_IP_);
 
-	if (btree_iter_type(iter) == BTREE_ITER_CACHED)
-		return bch2_btree_iter_traverse_cached(iter);
+	if (btree_iter_type(iter) == BTREE_ITER_CACHED) {
+		ret = bch2_btree_iter_traverse_cached(iter);
+		goto out;
+	}
 
 	if (iter->uptodate < BTREE_ITER_NEED_RELOCK)
-		return 0;
+		goto out;
 
 	if (unlikely(iter->level >= BTREE_MAX_DEPTH))
-		return 0;
+		goto out;
 
 	iter->level = btree_iter_up_until_good_node(iter, 0);
 
@@ -1347,12 +1368,18 @@ static int btree_iter_traverse_one(struct btree_iter *iter,
 	 * btree_iter_lock_root() comes next and that it can't fail
 	 */
 	while (iter->level > depth_want) {
-		int ret = btree_iter_node(iter, iter->level)
+		ret = btree_iter_node(iter, iter->level)
 			? btree_iter_down(iter, trace_ip)
 			: btree_iter_lock_root(iter, depth_want, trace_ip);
 		if (unlikely(ret)) {
-			if (ret == 1)
-				return 0;
+			if (ret == 1) {
+				/*
+				 * Got to the end of the btree (in
+				 * BTREE_ITER_NODES mode)
+				 */
+				ret = 0;
+				goto out;
+			}
 
 			iter->level = depth_want;
 
@@ -1364,14 +1391,16 @@ static int btree_iter_traverse_one(struct btree_iter *iter,
 				iter->l[iter->level].b =
 					BTREE_ITER_NO_NODE_DOWN;
 			}
-			return ret;
+			goto out;
 		}
 	}
 
 	iter->uptodate = BTREE_ITER_NEED_PEEK;
-
+out:
+	trace_iter_traverse(iter->trans->ip, trace_ip,
+			    iter->btree_id, &iter->real_pos, ret);
 	bch2_btree_iter_verify(iter);
-	return 0;
+	return ret;
 }
 
 static int __must_check __bch2_btree_iter_traverse(struct btree_iter *iter)
@@ -1382,7 +1411,7 @@ static int __must_check __bch2_btree_iter_traverse(struct btree_iter *iter)
 	ret =   bch2_trans_cond_resched(trans) ?:
 		btree_iter_traverse_one(iter, _RET_IP_);
 	if (unlikely(ret))
-		ret = __btree_iter_traverse_all(trans, ret);
+		ret = __btree_iter_traverse_all(trans, ret, _RET_IP_);
 
 	return ret;
 }
@@ -1406,9 +1435,16 @@ btree_iter_traverse(struct btree_iter *iter)
 int __must_check
 bch2_btree_iter_traverse(struct btree_iter *iter)
 {
+	int ret;
+
 	btree_iter_set_search_pos(iter, btree_iter_search_key(iter));
 
-	return btree_iter_traverse(iter);
+	ret = btree_iter_traverse(iter);
+	if (ret)
+		return ret;
+
+	iter->should_be_locked = true;
+	return 0;
 }
 
 /* Iterate across nodes (leaf and interior nodes) */
@@ -1434,6 +1470,7 @@ struct btree *bch2_btree_iter_peek_node(struct btree_iter *iter)
 	iter->pos = iter->real_pos = b->key.k.p;
 
 	bch2_btree_iter_verify(iter);
+	iter->should_be_locked = true;
 
 	return b;
 }
@@ -1490,6 +1527,7 @@ struct btree *bch2_btree_iter_next_node(struct btree_iter *iter)
 	iter->pos = iter->real_pos = b->key.k.p;
 
 	bch2_btree_iter_verify(iter);
+	iter->should_be_locked = true;
 
 	return b;
 }
@@ -1498,6 +1536,7 @@ struct btree *bch2_btree_iter_next_node(struct btree_iter *iter)
 
 static void btree_iter_set_search_pos(struct btree_iter *iter, struct bpos new_pos)
 {
+	struct bpos old_pos = iter->real_pos;
 	int cmp = bpos_cmp(new_pos, iter->real_pos);
 	unsigned l = iter->level;
 
@@ -1505,10 +1544,11 @@ static void btree_iter_set_search_pos(struct btree_iter *iter, struct bpos new_p
 		goto out;
 
 	iter->real_pos = new_pos;
+	iter->should_be_locked = false;
 
 	if (unlikely(btree_iter_type(iter) == BTREE_ITER_CACHED)) {
 		btree_node_unlock(iter, 0);
-		iter->l[0].b = BTREE_ITER_NO_NODE_UP;
+		iter->l[0].b = BTREE_ITER_NO_NODE_CACHED;
 		btree_iter_set_dirty(iter, BTREE_ITER_NEED_TRAVERSE);
 		return;
 	}
@@ -1537,6 +1577,11 @@ out:
 		btree_iter_set_dirty(iter, BTREE_ITER_NEED_PEEK);
 
 	bch2_btree_iter_verify(iter);
+#ifdef CONFIG_BCACHEFS_DEBUG
+	trace_iter_set_search_pos(iter->trans->ip, _RET_IP_,
+				  iter->btree_id,
+				  &old_pos, &new_pos, l);
+#endif
 }
 
 inline bool bch2_btree_iter_advance(struct btree_iter *iter)
@@ -1659,6 +1704,7 @@ start:
 
 	bch2_btree_iter_verify_entry_exit(iter);
 	bch2_btree_iter_verify(iter);
+	iter->should_be_locked = true;
 	return k;
 }
 
@@ -1743,6 +1789,7 @@ struct bkey_s_c bch2_btree_iter_peek_prev(struct btree_iter *iter)
 out:
 	bch2_btree_iter_verify_entry_exit(iter);
 	bch2_btree_iter_verify(iter);
+	iter->should_be_locked = true;
 	return k;
 no_key:
 	/*
@@ -1842,6 +1889,8 @@ struct bkey_s_c bch2_btree_iter_peek_slot(struct btree_iter *iter)
 
 	bch2_btree_iter_verify_entry_exit(iter);
 	bch2_btree_iter_verify(iter);
+	iter->should_be_locked = true;
+
 	return k;
 }
 
@@ -1878,6 +1927,8 @@ struct bkey_s_c bch2_btree_iter_peek_cached(struct btree_iter *iter)
 	EBUG_ON(iter->btree_id != ck->key.btree_id ||
 		bkey_cmp(iter->pos, ck->key.pos));
 	BUG_ON(!ck->valid);
+
+	iter->should_be_locked = true;
 
 	return bkey_i_to_s_c(ck->k);
 }
@@ -2055,13 +2106,6 @@ struct btree_iter *__bch2_trans_get_iter(struct btree_trans *trans,
 		best = iter;
 	}
 
-	trace_trans_get_iter(_RET_IP_, trans->ip,
-			     btree_id,
-			     &real_pos, locks_want,
-			     best ? &best->real_pos : &pos_min,
-			     best ? best->locks_want : 0,
-			     best ? best->uptodate : BTREE_ITER_NEED_TRAVERSE);
-
 	if (!best) {
 		iter = btree_trans_iter_alloc(trans);
 		bch2_btree_iter_init(trans, iter, btree_id);
@@ -2090,7 +2134,7 @@ struct btree_iter *__bch2_trans_get_iter(struct btree_trans *trans,
 	locks_want = min(locks_want, BTREE_MAX_DEPTH);
 	if (locks_want > iter->locks_want) {
 		iter->locks_want = locks_want;
-		btree_iter_get_locks(iter, true, false);
+		btree_iter_get_locks(iter, true, _THIS_IP_);
 	}
 
 	while (iter->level != depth) {
@@ -2107,6 +2151,13 @@ struct btree_iter *__bch2_trans_get_iter(struct btree_trans *trans,
 
 	bch2_btree_iter_set_pos(iter, pos);
 	btree_iter_set_search_pos(iter, real_pos);
+
+	trace_trans_get_iter(_RET_IP_, trans->ip,
+			     btree_id,
+			     &real_pos, locks_want, iter->uptodate,
+			     best ? &best->real_pos	: &pos_min,
+			     best ? best->locks_want	: U8_MAX,
+			     best ? best->uptodate	: U8_MAX);
 
 	return iter;
 }
@@ -2260,6 +2311,7 @@ static void bch2_trans_alloc_iters(struct btree_trans *trans, struct bch_fs *c)
 void bch2_trans_init(struct btree_trans *trans, struct bch_fs *c,
 		     unsigned expected_nr_iters,
 		     size_t expected_mem_bytes)
+	__acquires(&c->btree_trans_barrier)
 {
 	memset(trans, 0, sizeof(*trans));
 	trans->c		= c;
@@ -2292,6 +2344,7 @@ void bch2_trans_init(struct btree_trans *trans, struct bch_fs *c,
 }
 
 int bch2_trans_exit(struct btree_trans *trans)
+	__releases(&c->btree_trans_barrier)
 {
 	struct bch_fs *c = trans->c;
 

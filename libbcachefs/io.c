@@ -301,8 +301,9 @@ int bch2_extent_update(struct btree_trans *trans,
 
 		inode_iter = bch2_inode_peek(trans, &inode_u,
 				k->k.p.inode, BTREE_ITER_INTENT);
-		if (IS_ERR(inode_iter))
-			return PTR_ERR(inode_iter);
+		ret = PTR_ERR_OR_ZERO(inode_iter);
+		if (ret)
+			return ret;
 
 		/*
 		 * XXX:
@@ -329,11 +330,14 @@ int bch2_extent_update(struct btree_trans *trans,
 
 			inode_p.inode.k.p.snapshot = iter->snapshot;
 
-			bch2_trans_update(trans, inode_iter,
+			ret = bch2_trans_update(trans, inode_iter,
 					  &inode_p.inode.k_i, 0);
 		}
 
 		bch2_trans_iter_put(trans, inode_iter);
+
+		if (ret)
+			return ret;
 	}
 
 	ret =   bch2_trans_update(trans, iter, k, 0) ?:
@@ -1439,7 +1443,7 @@ static void promote_start(struct promote_op *op, struct bch_read_bio *rbio)
 	bch2_migrate_read_done(&op->write, rbio);
 
 	closure_init(cl, NULL);
-	closure_call(&op->write.op.cl, bch2_write, c->wq, cl);
+	closure_call(&op->write.op.cl, bch2_write, c->btree_update_wq, cl);
 	closure_return_with_destructor(cl, promote_done);
 }
 
@@ -1783,7 +1787,7 @@ static int __bch2_rbio_narrow_crcs(struct btree_trans *trans,
 	if (!bch2_bkey_narrow_crcs(new, new_crc))
 		goto out;
 
-	bch2_trans_update(trans, iter, new, 0);
+	ret = bch2_trans_update(trans, iter, new, 0);
 out:
 	bch2_trans_iter_put(trans, iter);
 	return ret;
@@ -1822,6 +1826,13 @@ static void __bch2_read_endio(struct work_struct *work)
 	if (bch2_crc_cmp(csum, rbio->pick.crc.csum))
 		goto csum_err;
 
+	/*
+	 * XXX
+	 * We need to rework the narrow_crcs path to deliver the read completion
+	 * first, and then punt to a different workqueue, otherwise we're
+	 * holding up reads while doing btree updates which is bad for memory
+	 * reclaim.
+	 */
 	if (unlikely(rbio->narrow_crcs))
 		bch2_rbio_narrow_crcs(rbio);
 

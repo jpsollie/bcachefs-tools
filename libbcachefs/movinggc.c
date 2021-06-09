@@ -317,6 +317,8 @@ static int bch2_copygc_thread(void *arg)
 	set_freezable();
 
 	while (!kthread_should_stop()) {
+		cond_resched();
+
 		if (kthread_wait_freezable(c->copy_gc_enabled))
 			break;
 
@@ -324,6 +326,7 @@ static int bch2_copygc_thread(void *arg)
 		wait = bch2_copygc_wait_amount(c);
 
 		if (wait > clock->max_slop) {
+			trace_copygc_wait(c, wait, last + wait);
 			c->copygc_wait = last + wait;
 			bch2_kthread_io_clock_wait(clock, last + wait,
 					MAX_SCHEDULE_TIMEOUT);

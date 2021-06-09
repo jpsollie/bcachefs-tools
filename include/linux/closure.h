@@ -1,8 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_CLOSURE_H
 #define _LINUX_CLOSURE_H
 
 #include <linux/llist.h>
+#include <linux/rcupdate.h>
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/workqueue.h>
 
 /*
@@ -103,6 +106,7 @@
 struct closure;
 struct closure_syncer;
 typedef void (closure_fn) (struct closure *);
+extern struct dentry *bcache_debug;
 
 struct closure_waitlist {
 	struct llist_head	list;
@@ -125,10 +129,10 @@ enum closure_state {
 	 * annotate where references are being transferred.
 	 */
 
-	CLOSURE_BITS_START	= (1U << 27),
-	CLOSURE_DESTRUCTOR	= (1U << 27),
-	CLOSURE_WAITING		= (1U << 29),
-	CLOSURE_RUNNING		= (1U << 31),
+	CLOSURE_BITS_START	= (1U << 26),
+	CLOSURE_DESTRUCTOR	= (1U << 26),
+	CLOSURE_WAITING		= (1U << 28),
+	CLOSURE_RUNNING		= (1U << 30),
 };
 
 #define CLOSURE_GUARD_MASK					\
@@ -156,7 +160,7 @@ struct closure {
 #define CLOSURE_MAGIC_DEAD	0xc054dead
 #define CLOSURE_MAGIC_ALIVE	0xc054a11e
 
-	unsigned		magic;
+	unsigned int		magic;
 	struct list_head	all;
 	unsigned long		ip;
 	unsigned long		waiting_on;
@@ -232,10 +236,16 @@ static inline void set_closure_fn(struct closure *cl, closure_fn *fn,
 static inline void closure_queue(struct closure *cl)
 {
 	struct workqueue_struct *wq = cl->wq;
+	/**
+	 * Changes made to closure, work_struct, or a couple of other structs
+	 * may cause work.func not pointing to the right location.
+	 */
+	BUILD_BUG_ON(offsetof(struct closure, fn)
+		     != offsetof(struct work_struct, func));
 
 	if (wq) {
 		INIT_WORK(&cl->work, cl->work.func);
-		queue_work(wq, &cl->work);
+		BUG_ON(!queue_work(wq, &cl->work));
 	} else
 		cl->fn(cl);
 }
@@ -279,19 +289,15 @@ static inline void closure_init_stack(struct closure *cl)
 }
 
 /**
- * closure_wake_up - wake up all closures on a wait list.
+ * closure_wake_up - wake up all closures on a wait list,
+ *		     with memory barrier
  */
 static inline void closure_wake_up(struct closure_waitlist *list)
 {
+	/* Memory barrier for the wait list */
 	smp_mb();
 	__closure_wake_up(list);
 }
-
-#define continue_at_noreturn(_cl, _fn, _wq)				\
-do {									\
-	set_closure_fn(_cl, _fn, _wq);					\
-	closure_sub(_cl, CLOSURE_RUNNING + 1);				\
-} while (0)
 
 /**
  * continue_at - jump to another function with barrier
@@ -300,16 +306,16 @@ do {									\
  * been dropped with closure_put()), it will resume execution at @fn running out
  * of @wq (or, if @wq is NULL, @fn will be called by closure_put() directly).
  *
- * NOTE: This macro expands to a return in the calling function!
- *
  * This is because after calling continue_at() you no longer have a ref on @cl,
  * and whatever @cl owns may be freed out from under you - a running closure fn
  * has a ref on its own closure which continue_at() drops.
+ *
+ * Note you are expected to immediately return after using this macro.
  */
 #define continue_at(_cl, _fn, _wq)					\
 do {									\
-	continue_at_noreturn(_cl, _fn, _wq);				\
-	return;								\
+	set_closure_fn(_cl, _fn, _wq);					\
+	closure_sub(_cl, CLOSURE_RUNNING + 1);				\
 } while (0)
 
 /**
@@ -328,32 +334,19 @@ do {									\
  * Causes @fn to be executed out of @cl, in @wq context (or called directly if
  * @wq is NULL).
  *
- * NOTE: like continue_at(), this macro expands to a return in the caller!
- *
  * The ref the caller of continue_at_nobarrier() had on @cl is now owned by @fn,
  * thus it's not safe to touch anything protected by @cl after a
  * continue_at_nobarrier().
  */
 #define continue_at_nobarrier(_cl, _fn, _wq)				\
 do {									\
-	closure_set_ip(_cl);						\
-	if (_wq) {							\
-		INIT_WORK(&(_cl)->work, (void *) _fn);			\
-		queue_work((_wq), &(_cl)->work);			\
-	} else {							\
-		(_fn)(_cl);						\
-	}								\
-	return;								\
-} while (0)
-
-#define closure_return_with_destructor_noreturn(_cl, _destructor)	\
-do {									\
-	set_closure_fn(_cl, _destructor, NULL);				\
-	closure_sub(_cl, CLOSURE_RUNNING - CLOSURE_DESTRUCTOR + 1);	\
+	set_closure_fn(_cl, _fn, _wq);					\
+	closure_queue(_cl);						\
 } while (0)
 
 /**
- * closure_return - finish execution of a closure, with destructor
+ * closure_return_with_destructor - finish execution of a closure,
+ *				    with destructor
  *
  * Works like closure_return(), except @destructor will be called when all
  * outstanding refs on @cl have been dropped; @destructor may be used to safely
@@ -363,8 +356,8 @@ do {									\
  */
 #define closure_return_with_destructor(_cl, _destructor)		\
 do {									\
-	closure_return_with_destructor_noreturn(_cl, _destructor);	\
-	return;								\
+	set_closure_fn(_cl, _destructor, NULL);				\
+	closure_sub(_cl, CLOSURE_RUNNING - CLOSURE_DESTRUCTOR + 1);	\
 } while (0)
 
 /**

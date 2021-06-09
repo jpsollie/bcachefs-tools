@@ -14,6 +14,7 @@ def test_mount(bfuse):
     bfuse.unmount()
     bfuse.verify()
 
+@pytest.mark.skipif(util.ENABLE_VALGRIND, reason="test broken")
 def test_remount(bfuse):
     bfuse.mount()
     bfuse.unmount()

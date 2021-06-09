@@ -834,7 +834,7 @@ static void bch2_journal_ptrs_to_text(struct printbuf *out, struct bch_fs *c,
 	unsigned i;
 
 	for (i = 0; i < j->nr_ptrs; i++) {
-		struct bch_dev *ca = c->devs[j->ptrs[i].dev];
+		struct bch_dev *ca = bch_dev_bkey_exists(c, j->ptrs[i].dev);
 		u64 offset;
 
 		div64_u64_rem(j->ptrs[i].offset, ca->mi.bucket_size, &offset);
@@ -1233,8 +1233,6 @@ static void journal_write_done(struct closure *cl)
 	struct journal *j = container_of(cl, struct journal, io);
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 	struct journal_buf *w = journal_last_unwritten_buf(j);
-	struct bch_devs_list devs =
-		bch2_bkey_devs(bkey_i_to_s_c(&w->key));
 	struct bch_replicas_padded replicas;
 	union journal_res_state old, new;
 	u64 v, seq;
@@ -1242,11 +1240,12 @@ static void journal_write_done(struct closure *cl)
 
 	bch2_time_stats_update(j->write_time, j->write_start_time);
 
-	if (!devs.nr) {
+	if (!w->devs_written.nr) {
 		bch_err(c, "unable to write journal to sufficient devices");
 		err = -EIO;
 	} else {
-		bch2_devlist_to_replicas(&replicas.e, BCH_DATA_journal, devs);
+		bch2_devlist_to_replicas(&replicas.e, BCH_DATA_journal,
+					 w->devs_written);
 		if (bch2_mark_replicas(c, &replicas.e))
 			err = -EIO;
 	}
@@ -1258,7 +1257,7 @@ static void journal_write_done(struct closure *cl)
 	seq = le64_to_cpu(w->data->seq);
 
 	if (seq >= j->pin.front)
-		journal_seq_pin(j, seq)->devs = devs;
+		journal_seq_pin(j, seq)->devs = w->devs_written;
 
 	j->seq_ondisk		= seq;
 	if (err && (!j->err_seq || seq < j->err_seq))
@@ -1296,27 +1295,27 @@ static void journal_write_done(struct closure *cl)
 	journal_wake(j);
 
 	if (test_bit(JOURNAL_NEED_WRITE, &j->flags))
-		mod_delayed_work(system_freezable_wq, &j->write_work, 0);
+		mod_delayed_work(c->io_complete_wq, &j->write_work, 0);
 	spin_unlock(&j->lock);
 
 	if (new.unwritten_idx != new.idx &&
 	    !journal_state_count(new, new.unwritten_idx))
-		closure_call(&j->io, bch2_journal_write, system_highpri_wq, NULL);
+		closure_call(&j->io, bch2_journal_write, c->io_complete_wq, NULL);
 }
 
 static void journal_write_endio(struct bio *bio)
 {
 	struct bch_dev *ca = bio->bi_private;
 	struct journal *j = &ca->fs->journal;
+	struct journal_buf *w = journal_last_unwritten_buf(j);
+	unsigned long flags;
 
-	if (bch2_dev_io_err_on(bio->bi_status, ca, "journal write error: %s",
+	if (bch2_dev_io_err_on(bio->bi_status, ca, "error writing journal entry %llu: %s",
+			       le64_to_cpu(w->data->seq),
 			       bch2_blk_status_to_str(bio->bi_status)) ||
 	    bch2_meta_write_fault("journal")) {
-		struct journal_buf *w = journal_last_unwritten_buf(j);
-		unsigned long flags;
-
 		spin_lock_irqsave(&j->err_lock, flags);
-		bch2_bkey_drop_device(bkey_i_to_s(&w->key), ca->dev_idx);
+		bch2_dev_list_drop_dev(&w->devs_written, ca->dev_idx);
 		spin_unlock_irqrestore(&j->err_lock, flags);
 	}
 
@@ -1370,7 +1369,7 @@ static void do_journal_write(struct closure *cl)
 			le64_to_cpu(w->data->seq);
 	}
 
-	continue_at(cl, journal_write_done, system_highpri_wq);
+	continue_at(cl, journal_write_done, c->io_complete_wq);
 	return;
 }
 
@@ -1402,7 +1401,8 @@ void bch2_journal_write(struct closure *cl)
 	    test_bit(JOURNAL_MAY_SKIP_FLUSH, &j->flags)) {
 		w->noflush = true;
 		SET_JSET_NO_FLUSH(jset, true);
-		jset->last_seq = w->last_seq = 0;
+		jset->last_seq	= 0;
+		w->last_seq	= 0;
 
 		j->nr_noflush_writes++;
 	} else {
@@ -1509,14 +1509,12 @@ retry_alloc:
 			journal_debug_buf);
 		kfree(journal_debug_buf);
 		bch2_fatal_error(c);
-		continue_at(cl, journal_write_done, system_highpri_wq);
+		continue_at(cl, journal_write_done, c->io_complete_wq);
 		return;
 	}
 
-	/*
-	 * XXX: we really should just disable the entire journal in nochanges
-	 * mode
-	 */
+	w->devs_written = bch2_bkey_devs(bkey_i_to_s_c(&w->key));
+
 	if (c->opts.nochanges)
 		goto no_io;
 
@@ -1542,14 +1540,14 @@ retry_alloc:
 
 	bch2_bucket_seq_cleanup(c);
 
-	continue_at(cl, do_journal_write, system_highpri_wq);
+	continue_at(cl, do_journal_write, c->io_complete_wq);
 	return;
 no_io:
 	bch2_bucket_seq_cleanup(c);
 
-	continue_at(cl, journal_write_done, system_highpri_wq);
+	continue_at(cl, journal_write_done, c->io_complete_wq);
 	return;
 err:
 	bch2_inconsistent_error(c);
-	continue_at(cl, journal_write_done, system_highpri_wq);
+	continue_at(cl, journal_write_done, c->io_complete_wq);
 }

@@ -263,7 +263,10 @@ do {									\
 	BCH_DEBUG_PARAM(verify_btree_ondisk,				\
 		"Reread btree nodes at various points to verify the "	\
 		"mergesort in the read path against modifications "	\
-		"done in memory")
+		"done in memory")					\
+	BCH_DEBUG_PARAM(verify_all_btree_replicas,			\
+		"When reading btree nodes, read all replicas and "	\
+		"compare them")
 
 /* Parameters that should only be compiled in in debug mode: */
 #define BCH_DEBUG_PARAMS_DEBUG()					\
@@ -386,6 +389,14 @@ struct gc_pos {
 	struct bpos		pos;
 	unsigned		level;
 };
+
+struct reflink_gc {
+	u64		offset;
+	u32		size;
+	u32		refcount;
+};
+
+typedef GENRADIX(struct reflink_gc) reflink_gc_table;
 
 struct io_count {
 	u64			sectors[2][BCH_DATA_NR];
@@ -564,6 +575,7 @@ struct bch_fs {
 	int			minor;
 	struct device		*chardev;
 	struct super_block	*vfs_sb;
+	dev_t			dev;
 	char			name[40];
 
 	/* ro/rw, add/remove/resize devices: */
@@ -623,6 +635,7 @@ struct bch_fs {
 
 	/* BTREE CACHE */
 	struct bio_set		btree_bio;
+	struct workqueue_struct	*io_complete_wq;
 
 	struct btree_root	btree_roots[BTREE_ID_NR];
 	struct mutex		btree_root_lock;
@@ -660,7 +673,8 @@ struct bch_fs {
 
 	struct btree_key_cache	btree_key_cache;
 
-	struct workqueue_struct	*wq;
+	struct workqueue_struct	*btree_update_wq;
+	struct workqueue_struct	*btree_error_wq;
 	/* copygc needs its own workqueue for index updates.. */
 	struct workqueue_struct	*copygc_wq;
 
@@ -799,6 +813,9 @@ struct bch_fs {
 
 	/* REFLINK */
 	u64			reflink_hint;
+	reflink_gc_table	reflink_gc_table;
+	size_t			reflink_gc_nr;
+	size_t			reflink_gc_idx;
 
 	/* VFS IO PATH - fs-io.c */
 	struct bio_set		writepage_bioset;

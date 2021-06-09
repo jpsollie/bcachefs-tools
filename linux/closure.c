@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Asynchronous refcounty things
  *
@@ -9,6 +10,7 @@
 #include <linux/debugfs.h>
 #include <linux/export.h>
 #include <linux/seq_file.h>
+#include <linux/sched/debug.h>
 
 static inline void closure_put_after_sub(struct closure *cl, int flags)
 {
@@ -44,7 +46,7 @@ void closure_sub(struct closure *cl, int v)
 }
 EXPORT_SYMBOL(closure_sub);
 
-/**
+/*
  * closure_put - decrement a closure's refcount
  */
 void closure_put(struct closure *cl)
@@ -53,24 +55,22 @@ void closure_put(struct closure *cl)
 }
 EXPORT_SYMBOL(closure_put);
 
-/**
+/*
  * closure_wake_up - wake up all closures on a wait list, without memory barrier
  */
 void __closure_wake_up(struct closure_waitlist *wait_list)
 {
-	struct llist_node *list, *next;
-	struct closure *cl;
+	struct llist_node *list;
+	struct closure *cl, *t;
+	struct llist_node *reverse = NULL;
 
-	/*
-	 * Grab entire list, reverse order to preserve FIFO ordering, and wake
-	 * everything up
-	 */
-	for (list = llist_reverse_order(llist_del_all(&wait_list->list));
-	     list;
-	     list = next) {
-		next = llist_next(list);
-		cl = container_of(list, struct closure, list);
+	list = llist_del_all(&wait_list->list);
 
+	/* We first reverse the list to preserve FIFO ordering and fairness */
+	reverse = llist_reverse_order(list);
+
+	/* Then do the wakeups */
+	llist_for_each_entry_safe(cl, t, reverse, list) {
 		closure_set_waiting(cl, 0);
 		closure_sub(cl, CLOSURE_WAITING + 1);
 	}
@@ -79,9 +79,9 @@ EXPORT_SYMBOL(__closure_wake_up);
 
 /**
  * closure_wait - add a closure to a waitlist
- *
- * @waitlist will own a ref on @cl, which will be released when
+ * @waitlist: will own a ref on @cl, which will be released when
  * closure_wake_up() is called on @waitlist.
+ * @cl: closure pointer.
  *
  */
 bool closure_wait(struct closure_waitlist *waitlist, struct closure *cl)
@@ -104,8 +104,14 @@ struct closure_syncer {
 
 static void closure_sync_fn(struct closure *cl)
 {
-	cl->s->done = 1;
-	wake_up_process(cl->s->task);
+	struct closure_syncer *s = cl->s;
+	struct task_struct *p;
+
+	rcu_read_lock();
+	p = READ_ONCE(s->task);
+	s->done = 1;
+	wake_up_process(p);
+	rcu_read_unlock();
 }
 
 void __sched __closure_sync(struct closure *cl)
@@ -113,11 +119,10 @@ void __sched __closure_sync(struct closure *cl)
 	struct closure_syncer s = { .task = current };
 
 	cl->s = &s;
-	continue_at_noreturn(cl, closure_sync_fn, NULL);
+	continue_at(cl, closure_sync_fn, NULL);
 
 	while (1) {
-		__set_current_state(TASK_UNINTERRUPTIBLE);
-		smp_mb();
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		if (s.done)
 			break;
 		schedule();
@@ -158,9 +163,7 @@ void closure_debug_destroy(struct closure *cl)
 }
 EXPORT_SYMBOL(closure_debug_destroy);
 
-static struct dentry *debug;
-
-static int debug_seq_show(struct seq_file *f, void *data)
+static int debug_show(struct seq_file *f, void *data)
 {
 	struct closure *cl;
 
@@ -169,7 +172,7 @@ static int debug_seq_show(struct seq_file *f, void *data)
 	list_for_each_entry(cl, &closure_list, all) {
 		int r = atomic_read(&cl->remaining);
 
-		seq_printf(f, "%p: %pF -> %pf p %p r %i ",
+		seq_printf(f, "%p: %pS -> %pS p %p r %i ",
 			   cl, (void *) cl->ip, cl->fn, cl->parent,
 			   r & CLOSURE_REMAINING_MASK);
 
@@ -179,7 +182,7 @@ static int debug_seq_show(struct seq_file *f, void *data)
 			   r & CLOSURE_RUNNING	? "R" : "");
 
 		if (r & CLOSURE_WAITING)
-			seq_printf(f, " W %pF\n",
+			seq_printf(f, " W %pS\n",
 				   (void *) cl->waiting_on);
 
 		seq_puts(f, "\n");
@@ -189,21 +192,11 @@ static int debug_seq_show(struct seq_file *f, void *data)
 	return 0;
 }
 
-static int debug_seq_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, debug_seq_show, NULL);
-}
-
-static const struct file_operations debug_ops = {
-	.owner		= THIS_MODULE,
-	.open		= debug_seq_open,
-	.read		= seq_read,
-	.release	= single_release
-};
+DEFINE_SHOW_ATTRIBUTE(debug);
 
 static int __init closure_debug_init(void)
 {
-	debug = debugfs_create_file("closures", 0400, NULL, NULL, &debug_ops);
+	debugfs_create_file("closures", 0400, NULL, NULL, &debug_fops);
 	return 0;
 }
 late_initcall(closure_debug_init)

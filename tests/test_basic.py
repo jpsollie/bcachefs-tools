@@ -37,7 +37,9 @@ def test_list(tmpdir):
     assert ret.returncode == 0
     assert len(ret.stderr) == 0
     assert "recovering from clean shutdown" in ret.stdout
-    assert len(ret.stdout.splitlines()) == 95
+
+    # Totally arbitrary, feel free to update or remove after inspecting.
+    assert len(ret.stdout.splitlines()) == 97
 
 def test_list_inodes(tmpdir):
     dev = util.format_1g(tmpdir)

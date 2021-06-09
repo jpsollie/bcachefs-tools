@@ -20,9 +20,9 @@
 
 set -e
 
-PYTEST=pytest-3
+PYTEST="${PYTEST:-pytest-3}"
 spam=$(tempfile)
-unset BCACHEFS_FUSE BCACHEFS_TEST_USE_VALGRIND D
+unset BCACHEFS_FUSE BCACHEFS_TEST_USE_VALGRIND BCACHEFS_DEBUG
 
 trap "set +x; cat ${spam}; rm -f ${spam} ; echo; echo FAILED." EXIT
 
@@ -61,10 +61,10 @@ function test_vg() {
 
 echo -- Test: default --
 build
-test    
+test
 
 echo -- Test: debug --
-export D=1
+export BCACHEFS_DEBUG=1
 build
 test
 

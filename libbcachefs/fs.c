@@ -144,7 +144,7 @@ int __must_check bch2_write_inode(struct bch_fs *c,
 	struct bch_inode_unpacked inode_u;
 	int ret;
 
-	bch2_trans_init(&trans, c, 0, 256);
+	bch2_trans_init(&trans, c, 0, 512);
 retry:
 	bch2_trans_begin(&trans);
 
@@ -1577,6 +1577,8 @@ got_sb:
 		percpu_ref_put(&ca->io_ref);
 		break;
 	}
+
+	c->dev = sb->s_dev;
 
 #ifdef CONFIG_BCACHEFS_POSIX_ACL
 	if (c->opts.acl)

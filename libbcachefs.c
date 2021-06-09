@@ -38,7 +38,7 @@ static u64 min_size(unsigned bucket_size)
 static void init_layout(struct bch_sb_layout *l,
 			unsigned block_size,
 			unsigned sb_size,
-			u64 start, u64 end)
+			u64 sb_start, u64 sb_end)
 {
 	unsigned i;
 
@@ -51,14 +51,14 @@ static void init_layout(struct bch_sb_layout *l,
 
 	/* Create two superblocks in the allowed range: */
 	for (i = 0; i < l->nr_superblocks; i++) {
-		if (start != BCH_SB_SECTOR)
-			start = round_up(start, block_size);
+		if (sb_start != BCH_SB_SECTOR)
+			sb_start = round_up(sb_start, block_size);
 
-		l->sb_offset[i] = cpu_to_le64(start);
-		start += sb_size;
+		l->sb_offset[i] = cpu_to_le64(sb_start);
+		sb_start += sb_size;
 	}
 
-	if (start >= end)
+	if (sb_start >= sb_end)
 		die("insufficient space for superblocks");
 }
 
@@ -291,6 +291,21 @@ struct bch_sb *bch2_format(struct bch_opt_strs	fs_opt_strs,
 		init_layout(&sb.sb->layout, fs_opts.block_size,
 			    opts.superblock_size,
 			    i->sb_offset, i->sb_end);
+
+		/*
+		 * Also create a backup superblock at the end of the disk:
+		 *
+		 * If we're not creating a superblock at the default offset, it
+		 * means we're being run from the migrate tool and we could be
+		 * overwriting existing data if we write to the end of the disk:
+		 */
+		if (i->sb_offset == BCH_SB_SECTOR) {
+			struct bch_sb_layout *l = &sb.sb->layout;
+			u64 backup_sb = i->size - (1 << l->sb_max_size_bits);
+
+			backup_sb = rounddown(backup_sb, i->bucket_size);
+			l->sb_offset[l->nr_superblocks++] = cpu_to_le64(backup_sb);
+		}
 
 		if (i->sb_offset == BCH_SB_SECTOR) {
 			/* Zero start of disk */

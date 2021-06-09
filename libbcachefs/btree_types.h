@@ -230,6 +230,7 @@ enum btree_iter_uptodate {
 #define BTREE_ITER_NO_NODE_DOWN		((struct btree *) 5)
 #define BTREE_ITER_NO_NODE_INIT		((struct btree *) 6)
 #define BTREE_ITER_NO_NODE_ERROR	((struct btree *) 7)
+#define BTREE_ITER_NO_NODE_CACHED	((struct btree *) 8)
 
 /*
  * @pos			- iterator's current position
@@ -251,7 +252,13 @@ struct btree_iter {
 	u8			idx;
 
 	enum btree_id		btree_id:4;
-	enum btree_iter_uptodate uptodate:4;
+	enum btree_iter_uptodate uptodate:3;
+	/*
+	 * True if we've returned a key (and thus are expected to keep it
+	 * locked), false after set_pos - for avoiding spurious transaction
+	 * restarts in bch2_trans_relock():
+	 */
+	bool			should_be_locked:1;
 	unsigned		level:4,
 				min_depth:4,
 				locks_want:4,
