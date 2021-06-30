@@ -1,0 +1,13 @@
+diff --git a/include/asm/xor.h b/include/asm/xor.h
+index b62a2a5..529d8bf 100644
+--- a/include/asm/xor.h
++++ b/include/asm/xor.h
+@@ -7,6 +7,8 @@
+ 
+ #include <linux/prefetch.h>
+ 
++#define prefetchw prefetch
++
+ static void
+ xor_8regs_2(unsigned long bytes, unsigned long *p1, unsigned long *p2)
+ {

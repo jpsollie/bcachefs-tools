@@ -1,0 +1,38 @@
+diff --git a/linux/crypto/xor.c b/linux/crypto/xor.c
+index 8e72e5d..81742e1 100644
+--- a/linux/crypto/xor.c
++++ b/linux/crypto/xor.c
+@@ -12,14 +12,31 @@
+ #include <linux/module.h>
+ #include <linux/gfp.h>
+ #include <linux/raid/xor.h>
+-#include <linux/jiffies.h>
+-#include <linux/preempt.h>
++/*#include <linux/jiffies.h>
++#include <linux/preempt.h> */
+ #include <asm/xor.h>
+ 
+ #ifndef XOR_SELECT_TEMPLATE
+ #define XOR_SELECT_TEMPLATE(x) (x)
+ #endif
+ 
++#define prefetchhw prefetch
++#define MODULE
++#include <time.h>
++#define ktime_t time_t
++#define ktime_get(X) time(NULL)
++#define ktime_sub(X, Y) (X - Y)
++#define ktime_to_ns(X) (X * 1000000)
++#define __initdata
++#define __init
++#define KERN_INFO
++#define KERN_WARNING
++#define mb()
++#define printk printf
++#define pr_info printf
++#define preempt_disable()
++#define preempt_enable()
++
+ /* The xor routines to use.  */
+ static struct xor_block_template *active_template;
+ 
