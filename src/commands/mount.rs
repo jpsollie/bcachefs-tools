@@ -23,7 +23,7 @@ fn mount_inner(
     src: String,
     target: impl AsRef<std::path::Path>,
     fstype: &str,
-    mountflags: libc::c_ulong,
+    mut mountflags: libc::c_ulong,
     data: Option<String>,
 ) -> anyhow::Result<()> {
     // bind the CStrings to keep them alive
@@ -38,11 +38,26 @@ fn mount_inner(
     let data = data.map_or(ptr::null(), |data| data.as_ptr().cast());
     let fstype = fstype.as_ptr();
 
-    let ret = {
-        info!("mounting filesystem");
-        // REQUIRES: CAP_SYS_ADMIN
-        unsafe { libc::mount(src, target, fstype, mountflags, data) }
-    };
+    let mut ret;
+    loop {
+        ret = {
+            info!("mounting filesystem");
+            // REQUIRES: CAP_SYS_ADMIN
+            unsafe { libc::mount(src, target, fstype, mountflags, data) }
+        };
+
+        let err = errno::errno().0;
+
+        if ret == 0
+            || (err != libc::EACCES && err != libc::EROFS)
+            || (mountflags & libc::MS_RDONLY) != 0
+        {
+            break;
+        }
+
+        println!("mount: device write-protected, mounting read-only");
+        mountflags |= libc::MS_RDONLY;
+    }
     match ret {
         0 => Ok(()),
         _ => Err(crate::ErrnoError(errno::errno()).into()),
@@ -321,35 +336,38 @@ fn cmd_mount_inner(cli: &Cli) -> Result<()> {
     // Grab the udev information once
     let udev_info = udev_bcachefs_info()?;
 
-    let (devices, mut sbs) = if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = cli.dev.split_once('=') {
-        devs_str_sbs_from_uuid(&udev_info, uuid)?
-    } else if cli.dev.contains(':') {
-        // If the device string contains ":" we will assume the user knows the
-        // entire list. If they supply a single device it could be either the FS
-        // only has 1 device or it's only 1 of a number of devices which are
-        // part of the FS. This appears to be the case when we get called during
-        // fstab mount processing and the fstab specifies a UUID.
+    let (devices, mut sbs) =
+        if let Some(("UUID" | "OLD_BLKID_UUID", uuid)) = cli.dev.split_once('=') {
+            devs_str_sbs_from_uuid(&udev_info, uuid)?
+        } else if cli.dev.contains(':') {
+            // If the device string contains ":" we will assume the user knows the
+            // entire list. If they supply a single device it could be either the FS
+            // only has 1 device or it's only 1 of a number of devices which are
+            // part of the FS. This appears to be the case when we get called during
+            // fstab mount processing and the fstab specifies a UUID.
 
-        let sbs = cli
-            .dev
-            .split(':')
-            .map(read_super_silent)
-            .collect::<Result<Vec<_>>>()?;
+            let sbs = cli
+                .dev
+                .split(':')
+                .map(read_super_silent)
+                .collect::<Result<Vec<_>>>()?;
 
-        (cli.dev.clone(), sbs)
-    } else {
-        devs_str_sbs_from_device(&udev_info, Path::new(&cli.dev))?
-    };
+            (cli.dev.clone(), sbs)
+        } else {
+            devs_str_sbs_from_device(&udev_info, Path::new(&cli.dev))?
+        };
 
     ensure!(!sbs.is_empty(), "No device(s) to mount specified");
 
     let first_sb = &sbs[0];
     if unsafe { bcachefs::bch2_sb_is_encrypted(first_sb.sb) } {
-        handle_unlock(cli, &first_sb)?;
+        handle_unlock(cli, first_sb)?;
     }
 
     for sb in &mut sbs {
-        unsafe { bch_bindgen::sb_io::bch2_free_super(sb); }
+        unsafe {
+            bch_bindgen::sb_io::bch2_free_super(sb);
+        }
     }
     drop(sbs);
 

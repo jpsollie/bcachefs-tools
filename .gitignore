@@ -10,8 +10,6 @@ TAGS
 cscope*
 bcachefs-tools
 compile_commands.json
-tests/test_helper
-tests/__pycache__/
 
 # dot-files that we don't want to ignore
 !.gitignore

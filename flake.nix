@@ -192,6 +192,7 @@
 
           treefmt.config = {
             projectRootFile = "flake.nix";
+            flakeCheck = false;
 
             programs = {
               nixfmt-rfc-style.enable = true;
