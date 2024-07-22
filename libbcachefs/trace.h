@@ -2,6 +2,10 @@
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM bcachefs
 
+#ifndef CLEAR_PAGES_IN_ADVANCE
+#define CLEAR_PAGES_IN_ADVANCE 1
+#endif
+
 #if !defined(_TRACE_BCACHEFS_H) || defined(TRACE_HEADER_MULTI_READ)
 
 #include <linux/tracepoint.h>

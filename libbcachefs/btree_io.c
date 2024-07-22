@@ -122,6 +122,9 @@ static void *btree_bounce_alloc(struct bch_fs *c, size_t size,
 
 	*used_mempool = false;
 	p = kvmalloc(size, __GFP_NOWARN|GFP_NOWAIT);
+#ifdef CLEAR_PAGES_IN_ADVANCE
+        memset(p, 0, size);
+#endif
 	if (!p) {
 		*used_mempool = true;
 		p = mempool_alloc(&c->btree_bounce_pool, GFP_NOFS);

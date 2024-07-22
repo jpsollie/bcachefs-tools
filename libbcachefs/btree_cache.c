@@ -103,6 +103,9 @@ static int btree_node_data_alloc(struct bch_fs *c, struct btree *b, gfp_t gfp)
 	BUG_ON(b->data || b->aux_data);
 
 	b->data = kvmalloc(btree_buf_bytes(b), gfp);
+#ifdef CLEAR_PAGES_IN_ADVANCE
+	memset(b->data, 0, btree_buf_bytes(b));
+#endif
 	if (!b->data)
 		return -BCH_ERR_ENOMEM_btree_node_mem_alloc;
 #ifdef __KERNEL__
